@@ -55,9 +55,7 @@ def frame_iv(algorithm, sequence_number):
     """
     if sequence_number < 1 or sequence_number > MAX_FRAME_COUNT:
         raise ActionNotAllowedError(
-            "Invalid frame sequence number: {actual}\nMust be between 1 and {max}".format(
-                actual=sequence_number, max=MAX_FRAME_COUNT
-            )
+            f"Invalid frame sequence number: {sequence_number}\nMust be between 1 and {MAX_FRAME_COUNT}"
         )
     prefix_len = algorithm.iv_len - 4
     prefix = b"\x00" * prefix_len

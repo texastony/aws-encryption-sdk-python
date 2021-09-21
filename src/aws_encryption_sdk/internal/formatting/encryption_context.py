@@ -43,7 +43,7 @@ def assemble_content_aad(message_id, aad_content_string, seq_num, length):
     """
     if not isinstance(aad_content_string, aws_encryption_sdk.identifiers.ContentAADString):
         raise SerializationError("Unknown aad_content_string")
-    fmt = ">{}s{}sIQ".format(len(message_id), len(aad_content_string.value))
+    fmt = f">{len(message_id)}s{len(aad_content_string.value)}sIQ"
     return struct.pack(fmt, message_id, aad_content_string.value, seq_num, length)
 
 
@@ -78,16 +78,14 @@ def serialize_encryption_context(encryption_context):
             )
         except Exception:
             raise SerializationError(
-                "Cannot encode dictionary key or value using {}.".format(aws_encryption_sdk.internal.defaults.ENCODING)
+                f"Cannot encode dictionary key or value using {aws_encryption_sdk.internal.defaults.ENCODING}."
             )
 
     for key, value in sorted(encryption_context_list, key=lambda x: x[0]):
         serialized_context.extend(
             struct.pack(
-                ">H{key_size}sH{value_size}s".format(key_size=len(key), value_size=len(value)),
-                len(key),
+                f">H{len(key)}sH{len(value)}s",
                 key,
-                len(value),
                 value,
             )
         )

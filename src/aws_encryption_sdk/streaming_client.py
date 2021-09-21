@@ -176,7 +176,7 @@ class _EncryptionStream(io.IOBase):
             or not (hasattr(cls, "_prep_message") and callable(cls._read_bytes))
             or not hasattr(cls, "_config_class")
         ):
-            raise TypeError("Can't instantiate abstract class {}".format(cls.__name__))
+            raise TypeError(f"Can't instantiate abstract class {cls.__name__}")
 
         instance = super(_EncryptionStream, cls).__new__(cls)
 
@@ -466,11 +466,11 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
         if self.config.algorithm is not None and self._encryption_materials.algorithm != self.config.algorithm:
             raise ActionNotAllowedError(
                 (
-                    "Cryptographic materials manager provided algorithm suite"
-                    " differs from algorithm suite in request.\n"
-                    "Required: {requested}\n"
-                    "Provided: {provided}"
-                ).format(requested=self.config.algorithm, provided=self._encryption_materials.algorithm)
+                    f"Cryptographic materials manager provided algorithm suite"
+                    f" differs from algorithm suite in request.\n"
+                    f"Required: {self.config.algorithm}\n"
+                    f"Provided: {self._encryption_materials.algorithm}"
+                )
             )
 
         num_keys = len(self._encryption_materials.encrypted_data_keys)
@@ -711,9 +711,8 @@ class StreamEncryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
             # must not exceed that value.
             if self._bytes_encrypted > self.config.source_length:
                 raise CustomMaximumValueExceeded(
-                    "Bytes encrypted has exceeded stated source length estimate:\n{actual:d} > {estimated:d}".format(
-                        actual=self._bytes_encrypted, estimated=self.config.source_length
-                    )
+                    f"Bytes encrypted has exceeded stated source length estimate:\n"
+                    f"{self._bytes_encrypted:d} > {self.config.source_length:d}"
                 )
 
     def close(self):
@@ -816,9 +815,8 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
             and header.frame_length > self.config.max_body_length
         ):
             raise CustomMaximumValueExceeded(
-                "Frame Size in header found larger than custom value: {found:d} > {custom:d}".format(
-                    found=header.frame_length, custom=self.config.max_body_length
-                )
+                f"Frame Size in header found larger than custom value: "
+                f"{header.frame_length:d} > {self.config.max_body_length:d}"
             )
 
         decrypt_materials_request = DecryptionMaterialsRequest(
@@ -869,9 +867,8 @@ class StreamDecryptor(_EncryptionStream):  # pylint: disable=too-many-instance-a
 
         if self.config.max_body_length is not None and self.body_length > self.config.max_body_length:
             raise CustomMaximumValueExceeded(
-                "Non-framed message content length found larger than custom value: {found:d} > {custom:d}".format(
-                    found=self.body_length, custom=self.config.max_body_length
-                )
+                f"Non-framed message content length found larger than custom value: "
+                f"{self.body_length:d} > {self.config.max_body_length:d}"
             )
 
         self.__unframed_bytes_read += self._header.algorithm.iv_len

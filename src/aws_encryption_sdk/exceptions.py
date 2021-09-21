@@ -34,10 +34,7 @@ class MaxEncryptedDataKeysExceeded(CustomMaximumValueExceeded):
     def __init__(self, num_keys, max_keys):
         """Prepares exception message."""
         super(MaxEncryptedDataKeysExceeded, self).__init__(
-            "Number of encrypted data keys found larger than configured value: {num_keys:d} > {max_keys:d}".format(
-                num_keys=num_keys,
-                max_keys=max_keys,
-            )
+            f"Number of encrypted data keys found larger than configured value: {num_keys:d} > {max_keys:d}"
         )
 
 

@@ -52,15 +52,13 @@ def validate_frame_length(frame_length, algorithm):
     """
     if frame_length < 0 or frame_length % algorithm.encryption_algorithm.block_size != 0:
         raise SerializationError(
-            "Frame size must be a non-negative multiple of the block size of the crypto algorithm: {block_size}".format(
-                block_size=algorithm.encryption_algorithm.block_size
-            )
+            f"Frame size must be a non-negative multiple of the block"
+            f" size of the crypto algorithm: {algorithm.encryption_algorithm.block_size}"
         )
     if frame_length > aws_encryption_sdk.internal.defaults.MAX_FRAME_SIZE:
         raise SerializationError(
-            "Frame size too large: {frame} > {max}".format(
-                frame=frame_length, max=aws_encryption_sdk.internal.defaults.MAX_FRAME_SIZE
-            )
+            f"Frame size too large: {frame_length} > "
+            f"{aws_encryption_sdk.internal.defaults.MAX_FRAME_SIZE}"
         )
 
 
@@ -159,7 +157,6 @@ def source_data_key_length_check(source_data_key, algorithm):
     """
     if len(source_data_key.data_key) != algorithm.kdf_input_len:
         raise InvalidDataKeyError(
-            "Invalid Source Data Key length {actual} for algorithm required: {required}".format(
-                actual=len(source_data_key.data_key), required=algorithm.kdf_input_len
-            )
+            f"Invalid Source Data Key length {len(source_data_key.data_key)} "
+            f"for algorithm required: {algorithm.kdf_input_len}"
         )

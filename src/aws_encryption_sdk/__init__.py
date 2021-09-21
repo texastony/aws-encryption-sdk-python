@@ -85,10 +85,8 @@ class EncryptionSDKClient(object):
         for key in ("commitment_policy", "max_encrypted_data_keys"):
             if key in kwargs_dict:
                 warnings.warn(
-                    "Invalid keyword argument '{key}' passed to {callee}. "
-                    "Set this value by passing a 'config' to the EncryptionSDKClient constructor instead.".format(
-                        key=key, callee=callee_name
-                    )
+                    f"Invalid keyword argument '{key}' passed to {callee_name}. "
+                    f"Set this value by passing a 'config' to the EncryptionSDKClient constructor instead."
                 )
         kwargs_dict["commitment_policy"] = self.config.commitment_policy
         kwargs_dict["max_encrypted_data_keys"] = self.config.max_encrypted_data_keys
@@ -268,4 +266,4 @@ class EncryptionSDKClient(object):
         try:
             return _stream_map[mode.lower()](**kwargs)
         except KeyError:
-            raise ValueError("Unsupported mode: {}".format(mode))
+            raise ValueError(f"Unsupported mode: {mode}")

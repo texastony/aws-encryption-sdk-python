@@ -185,4 +185,4 @@ def arn_from_str(arn_str):  # noqa: C901
 
         return Arn(partition, service, region, account, resource_type, resource_id)
     except (IndexError, MalformedArnError) as exc:
-        raise MalformedArnError("Resource {} could not be parsed as an ARN: {}".format(arn_str, exc.args[0]))
+        raise MalformedArnError(f"Resource {arn_str} could not be parsed as an ARN: {exc.args[0]}")

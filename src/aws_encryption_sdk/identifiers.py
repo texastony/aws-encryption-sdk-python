@@ -28,7 +28,7 @@ except ImportError:  # pragma: no cover
     pass
 
 __version__ = "3.0.0"
-USER_AGENT_SUFFIX = "AwsEncryptionSdkPython/{}".format(__version__)
+USER_AGENT_SUFFIX = f"AwsEncryptionSdkPython/{__version__}"
 
 
 class EncryptionSuite(Enum):

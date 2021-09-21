@@ -1,3 +1,4 @@
+# pylint: disable=consider-using-f-string
 # Copyright 2017 Amazon.com, Inc. or its affiliates. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License"). You
@@ -132,7 +133,7 @@ def _serialize_header_v2(header, signer=None):
         header.encryption_context
     )
     header_start_format = (
-        ">"  # big endian
+        ">"  # pylint: disable: consider-using-f-string  # big endian
         "B"  # version
         "H"  # algorithm ID
         "32s"  # message ID

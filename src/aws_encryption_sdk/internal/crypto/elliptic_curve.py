@@ -136,7 +136,7 @@ def _ecc_decode_compressed_point(curve, compressed_point):
         try:
             params = _ECC_CURVE_PARAMETERS[curve.name]
         except KeyError:
-            raise NotSupportedError("Curve {name} is not supported at this time".format(name=curve.name))
+            raise NotSupportedError(f"Curve {curve.name} is not supported at this time")
         alpha = (pow(x, 3, params.p) + (params.a * x % params.p) + params.b) % params.p
         # Only works for p % 4 == 3 at this time.
         # This is the case for all currently supported algorithms.

@@ -56,7 +56,7 @@ class WrappingKey(object):
                 source_key=self._wrapping_key, algorithm=self.wrapping_algorithm.algorithm, message_id=None
             )
         else:
-            raise InvalidDataKeyError("Invalid wrapping_key_type: {}".format(wrapping_key_type))
+            raise InvalidDataKeyError(f"Invalid wrapping_key_type: {wrapping_key_type}")
 
     def encrypt(self, plaintext_data_key, encryption_context):
         """Encrypts a data key using a direct wrapping key.

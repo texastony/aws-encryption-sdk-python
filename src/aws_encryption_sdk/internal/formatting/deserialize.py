@@ -96,7 +96,7 @@ def _verified_version_from_id(version_id):
     try:
         return SerializationVersion(version_id)
     except ValueError as error:
-        raise NotSupportedError("Unsupported version {}".format(version_id), error)
+        raise NotSupportedError(f"Unsupported version {version_id}", error)
 
 
 def _verified_message_type_from_id(message_type_id):
@@ -111,7 +111,7 @@ def _verified_message_type_from_id(message_type_id):
     try:
         return ObjectType(message_type_id)
     except ValueError as error:
-        raise NotSupportedError("Unsupported type {} discovered in data stream".format(message_type_id), error)
+        raise NotSupportedError(f"Unsupported type {message_type_id} discovered in data stream", error)
 
 
 def _verified_algorithm_from_id(algorithm_id):
@@ -127,10 +127,10 @@ def _verified_algorithm_from_id(algorithm_id):
     try:
         algorithm_suite = AlgorithmSuite.get_by_id(algorithm_id)
     except KeyError as error:
-        raise UnknownIdentityError("Unknown algorithm {}".format(algorithm_id), error)
+        raise UnknownIdentityError(f"Unknown algorithm {algorithm_id}", error)
 
     if not algorithm_suite.allowed:
-        raise NotSupportedError("Unsupported algorithm: {}".format(algorithm_suite))
+        raise NotSupportedError(f"Unsupported algorithm: {algorithm_suite}")
 
     return algorithm_suite
 
