@@ -35,6 +35,9 @@ jobs:
           - local
           - accept
           - mpllocal
+          # Offline examples tests (pytest.mark.local); these need no credentials.
+          - exampleslocal
+          - mplexampleslocal
 # These require credentials.
 # Enable them once we sort how to provide them.
 #          - integ
@@ -48,6 +51,12 @@ jobs:
           # mpllocal requires the MPL to be installed
           - category: mpllocal
             optional_mpl_dependency: ""
+          # mplexampleslocal requires the MPL to be installed
+          - category: mplexampleslocal
+            optional_mpl_dependency: ""
+          # exampleslocal is the legacy (Master Key Provider) examples, which do not use the MPL
+          - category: exampleslocal
+            optional_mpl_dependency: -mpl
     steps:
       # Support long Dafny filenames (used in MPL and DBESDK repos)
       - name: Support longpaths

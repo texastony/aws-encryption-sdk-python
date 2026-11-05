@@ -12,7 +12,8 @@ from botocore.credentials import Credentials
 from ...src.multi_tenant.kms_transport import KmsTransport, default_endpoint_url
 from . import fake_kms
 
-pytestmark = [pytest.mark.examples]
+# Offline: no network access, so these also run as local tests (tox: exampleslocal, mplexampleslocal).
+pytestmark = [pytest.mark.examples, pytest.mark.local]
 
 KEY_ARN = "arn:aws:kms:us-west-2:111122223333:key/11111111-1111-1111-1111-111111111111"
 TENANT = Credentials("AKIATENANT", "secret")

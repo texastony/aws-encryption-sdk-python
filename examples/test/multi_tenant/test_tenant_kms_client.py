@@ -10,7 +10,8 @@ from ...src.multi_tenant import KmsTransport, TenantKmsClient
 from ...src.multi_tenant.tenant_kms_client import METHOD_TO_API_MAPPING
 from . import fake_kms
 
-pytestmark = [pytest.mark.examples]
+# Offline: no network access, so these also run as local tests (tox: exampleslocal, mplexampleslocal).
+pytestmark = [pytest.mark.examples, pytest.mark.local]
 
 KEY_A = "arn:aws:kms:us-west-2:111122223333:key/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 KEY_A2 = "arn:aws:kms:us-west-2:111122223333:key/a2a2a2a2-a2a2-a2a2-a2a2-a2a2a2a2a2a2"

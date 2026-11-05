@@ -23,7 +23,8 @@ from ...src.legacy.multi_tenant_kms_master_key_provider import (
 from ...src.multi_tenant import KmsTransport, TenantKmsClient
 from ..multi_tenant import fake_kms
 
-pytestmark = [pytest.mark.examples]
+# Offline: no network access, so these also run as local tests (tox: exampleslocal, mplexampleslocal).
+pytestmark = [pytest.mark.examples, pytest.mark.local]
 
 KEY_A = "arn:aws:kms:us-west-2:111122223333:key/aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 MRK_A = "arn:aws:kms:us-west-2:111122223333:key/mrk-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
