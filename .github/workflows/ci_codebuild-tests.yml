@@ -1,11 +1,8 @@
 name: AWS CodeBuild CI
 
 on:
-  push:
-  # Run once a day
-  schedule:
-    - cron: "0 0 * * *"
-  # Add workflow_call trigger
+  # Only called by pull.yml, push.yml, and daily_ci.yml.
+  # Its own push and schedule triggers are removed, temporarily, for development on a fork.
   workflow_call:
     # Define any secrets that need to be passed from the caller
     secrets:
@@ -19,8 +16,7 @@ permissions:
 jobs:
   codebuild-tests:
     name: AWS CodeBuild CI
-    # Forks have no CI_AWS_ROLE_ARN, nor the CodeBuild project; skip there,
-    # including this workflow's own push and schedule triggers.
+    # Forks have no CI_AWS_ROLE_ARN, nor the CodeBuild project; skip there.
     if: github.repository_owner == 'aws'
     runs-on: ubuntu-latest
     strategy:
