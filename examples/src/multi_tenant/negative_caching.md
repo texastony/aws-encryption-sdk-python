@@ -365,19 +365,81 @@ one per Tenant Hierarchical Keyring costs nothing of note.
 
 **The Cache Guard passes through the error it received**:  
 The Cache Guard fails `GetCacheEntry`
-by raising the error the Tenant KMS Client received from AWS KMS,
-as is,
-from the Negative Cache Entry.
+with the error the Tenant KMS Client received from AWS KMS,
+the same object,
+from the Negative Cache Entry;
+wrapped,
+so it survives the MPL's conversion to and from Dafny:
+it raises `OpaqueWithTextError(obj=error, obj_message=str(error))`.
 
-_Note_: The MPL maps an error raised by a native cache
-with `_smithy_error_to_dafny_error`;
-an error that is not an MPL error,
-such as botocore's `ClientError`,
-becomes an opaque error carrying it.
+UPDATE: An earlier revision raised the error itself.
+The MPL converts an error raised by a native cache
+with `_smithy_error_to_dafny_error`,
+and converts it back with `_deserialize_error`
+before the ESDK-Python raises it.
+Raised as is,
+a botocore `ClientError` became an `OpaqueError`,
+whose `str()` is empty;
+the code was only reachable inside it.
+
+The author compared the wrappers for all eight Denial codes,
+with a realistic AWS KMS message that does not contain its code,
+through a real Hierarchical Keyring on encrypt and decrypt:
+
+| Wrapper | The code survives | The original error, the same object | The code in the outermost `str()` |
+| ------- | ----------------- | ----------------------------------- | --------------------------------- |
+| `ComAmazonawsKms(message=error)` | 4 of 8 | never | 4 of 8, on encrypt only |
+| `OpaqueWithTextError(obj=error, obj_message=str(error))` | 8 of 8 | 8 of 8 | never |
+
+**A `ComAmazonawsKms` error loses the code of the KMS errors the MPL models**:  
+It is converted by the MPL's AWS KMS shim,
+as a real AWS KMS failure would be;
+the KMS errors the MPL models
+(`DisabledException`, `KMSInvalidStateException`, `NotFoundException`, `IncorrectKeyException`)
+become typed errors that keep only their message,
+and the code is lost.
+Dafny keeps only the error's data,
+so the original object is lost for every code.
+
+**An `OpaqueWithTextError` keeps both**:  
+Dafny's opaque errors carry the Python object itself;
+`obj` is the original error, the same object,
+and `obj_message` its text, which names the code.
+
+**But not in `str()`**:  
+The MPL generates `OpaqueWithTextError` with an empty message,
+so its `str()` is always empty;
+its `repr()`, and its `obj_message`, name the code.
+On decrypt,
+the ESDK-Python raises its own error
+("No Configured KMS Key was able to decrypt the Data Key"),
+with the Cache Guard's error within the MPL's `CollectionOfErrors`,
+whichever wrapper is raised.
 Thus,
-the first Denial surfaces wrapped by the AWS KMS Key Store's error,
-and later failures as an opaque error carrying the original;
-the original error is the same in both.
+the Branch Key ID, the code, and the error's text are logged when a Denial is recorded,
+which is where an operator sees them.
+AWS KMS's message MAY name account ids or role ARNs;
+neither is secret.
+
+**A new wrapper per raise**:  
+Re-raising one exception object appends each raise's frames to its traceback;
+it would grow without bound,
+keeping every frame,
+and its locals,
+alive for as long as the Denial is honored.
+A new wrapper per raise does not.
+
+**The first Denial loses more**:  
+The first Denial is a real cache miss:
+AWS KMS's error passes through the MPL's AWS KMS shim,
+and surfaces as the AWS KMS Key Store's error.
+The author confirmed, against DynamoDB Local with the fake KMS,
+that for the four KMS errors the MPL models
+no `str()`, no `repr()`, and no object in the error names the code;
+and that the original error is never kept.
+Thus,
+the Cache Guard's failures carry more than the first Denial's;
+the code of the first Denial is in the log.
 
 **Encrypt and decrypt are treated the same**:  
 A Denial from `GetActiveBranchKey` (encrypt)
@@ -533,11 +595,11 @@ stores,
 or passes the Tenant's Credentials,
 or by its clock.
 Negative caching does not fix them;
-it stops every request from calling Amazon DynamoDB and AWS KMS,
-and,
-as the Cache Guard passes through the error it received
-([4.3](#43-a-cache-guard)),
-the cause remains visible.
+it stops every request from calling Amazon DynamoDB and AWS KMS.
+The cause remains available:
+the Branch Key ID and the code are logged when the Denial is recorded,
+and the Cache Guard's error carries the original error, the same object
+([4.3](#43-a-cache-guard)).
 
 **Each Branch Key ID is Denied on its own**:  
 as in [5.1](#51-expired-credentials-are-a-denial).
@@ -779,6 +841,10 @@ each Branch Key ID is Denied on its own.
    UPDATE: The Cache Guard passes through the error it received, as is
    ([4.3](#43-a-cache-guard)).
 
+   UPDATE: As is, but wrapped in an `OpaqueWithTextError`,
+   so the original error, the same object, and its code survive the MPL's conversion to and from Dafny;
+   the code is also logged when the Denial is recorded ([4.3](#43-a-cache-guard)).
+
 3. **Thread safety**:
    Negative Cache Entries are written by Tenant KMS Clients
    and read by Cache Guards,
@@ -805,3 +871,6 @@ each Branch Key ID is Denied on its own.
   this is behavior, not a documented interface.
 - Negative caching requires the Tenant KMS Client ([3.3](#33-the-tenant-kms-client)).
 - Every Tenant Hierarchical Keyring has a static Branch Key ID ([7.2](#72-a-tenant-keyring-factory)).
+- The Cache Guard's error depends on how the MPL converts native cache errors to and from Dafny,
+  which is generated code, not a documented interface;
+  its outermost `str()` does not name the code, and an operator relies on the log ([4.3](#43-a-cache-guard)).
