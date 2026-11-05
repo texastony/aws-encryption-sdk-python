@@ -36,7 +36,8 @@ See [Design Question 5](#5-what-is-a-denial).
 ## Negative Cache Entry
 
 A record that a Branch Key ID was Denied,
-with the time it was Denied
+with the error AWS KMS returned,
+the time it was Denied,
 and the time it expires.
 
 ## Negative TTL
@@ -44,6 +45,9 @@ and the time it expires.
 How long a Negative Cache Entry is honored.
 While it is honored,
 no request is made to Amazon DynamoDB or AWS KMS for that Branch Key ID.
+
+The Negative TTL is configured per [Tenant Keyring Factory](#tenant-keyring-factory),
+and defaults to 5 minutes.
 
 ## Cache Guard
 
@@ -122,8 +126,7 @@ only by implementing the public, extendable interfaces
    for any version of the Branch Key.
 
 4. Only a [Denial](#5-what-is-a-denial) MUST create a Negative Cache Entry;
-   transient failures (throttling, server errors, timeouts)
-   and failures of the Tenant's credentials MUST NOT.
+   transient failures (throttling, server errors, timeouts, expired credentials) MUST NOT.
 
 5. The ESDK-Python and MPL source MUST NOT be changed;
    only their public, extendable interfaces MAY be implemented.
@@ -134,13 +137,15 @@ only by implementing the public, extendable interfaces
 7. Every Tenant's Hierarchical Keyring MUST still share one cache
    ([design.md 10.1](./design.md#101-one-shared-cache)).
 
+8. The Tenant Keyring Factory, and every object it vends, MUST be thread safe,
+   and this SHOULD be tested.
+
 # Out of Scope
 
 - Keyrings other than the AWS KMS Hierarchical Keyring,
   the KMS Master Key Providers,
   and the Caching Cryptographic Materials Manager.
 - Failures of Amazon DynamoDB, including a missing Branch Key item.
-- Propagating a `NotFoundException` to every Branch Key ID protected by the same KMS Key.
 - A Branch Key ID Supplier selecting among Branch Key IDs within one keyring;
   see [Design Question 7](#7-who-builds-a-tenant-hierarchical-keyring).
 
@@ -149,18 +154,6 @@ only by implementing the public, extendable interfaces
 The DynamoDB table is owned by the application, not the Tenant.
 A DynamoDB failure is the application's to resolve,
 and is not a statement about any one Tenant.
-
-## Why not propagate `NotFoundException` across Branch Key IDs?
-
-A KMS Key that does not exist does not exist for every Branch Key it protects;
-a `NotFoundException` for one Branch Key ID could create a Negative Cache Entry
-for every Branch Key ID protected by that KMS Key.
-
-That requires mapping KMS Keys to Branch Key IDs,
-which the Cache Guard does not otherwise need
-([Design Question 6](#6-why-the-branch-key-id-and-not-the-kms-key-arn)).
-It is an optimization;
-each Branch Key ID is Denied on its own first failure regardless.
 
 # Design Questions
 
@@ -264,7 +257,7 @@ Not possible;
 the cache is never told of a failure ([1](#1-where-does-the-hierarchical-keyring-call-aws-kms)).
 
 A cache could infer one from a miss that is not followed by `PutCacheEntry`;
-it cannot distinguish a failure from a slow fetch,
+but it cannot distinguish a failure from a slow fetch,
 nor a Denial from throttling.
 
 ### 3.2 A keyring wrapper
@@ -356,6 +349,39 @@ a cache shared by every Tenant cannot tell which Branch Key ID a lookup is for.
 A Cache Guard per Tenant Hierarchical Keyring is bound to that keyring's Branch Key ID,
 and delegates to the one shared cache,
 satisfying Requirement 7.
+
+**The Cache Guard is a lightweight object**:  
+A cache is normally a Heavy Object
+([design.md, Heavy Object](./design.md#heavy-object));
+it holds every entry.
+While the Cache Guard is a cache,
+it holds only its Branch Key ID's Negative Cache Entry, if any,
+and a reference to the shared cache;
+one per Tenant Hierarchical Keyring costs nothing of note.
+
+**The Cache Guard passes through the error it received**:  
+The Cache Guard fails `GetCacheEntry`
+by raising the error the Tenant KMS Client received from AWS KMS,
+as is,
+from the Negative Cache Entry.
+
+_Note_: The MPL maps an error raised by a native cache
+with `_smithy_error_to_dafny_error`;
+an error that is not an MPL error,
+such as botocore's `ClientError`,
+becomes an opaque error carrying it.
+Thus,
+the first Denial surfaces wrapped by the AWS KMS Key Store's error,
+and later failures as an opaque error carrying the original;
+the original error is the same in both.
+
+**Encrypt and decrypt are treated the same**:  
+A Denial from `GetActiveBranchKey` (encrypt)
+and from `GetBranchKeyVersion` (decrypt)
+create the same Negative Cache Entry for the Branch Key ID,
+and the Cache Guard fails every lookup for that Branch Key ID,
+for encrypt and decrypt,
+and for every version (Requirement 3).
 
 ### 4.4 Author's conclusion
 
@@ -476,7 +502,7 @@ It holds:
 - the AWS KMS Key Store configuration,
   other than the KMS client
   (table name, Logical Key Store Name, AWS KMS Configuration, grant tokens)
-- the Negative TTL
+- the Negative TTL (default 5 minutes)
 
 Given a Branch Key ID,
 the Tenant's Credentials,
@@ -573,25 +599,76 @@ remain blocked until the in flight TTL.
 Callers after the Denial are failed by the Cache Guard,
 without reaching the storm tracking cache.
 
+## 10 Should a `NotFoundException` propagate across Branch Key IDs?
+
+A KMS Key that does not exist does not exist for every Branch Key it protects;
+a `NotFoundException` for one Branch Key ID could create a Negative Cache Entry
+for every Branch Key ID protected by that KMS Key.
+
+**It requires mapping KMS Keys to Branch Key IDs**:  
+which the Cache Guard does not otherwise need
+([6](#6-why-the-branch-key-id-and-not-the-kms-key-arn)).
+Under `Discovery` and `MRDiscovery`,
+the KMS Key of a Branch Key is only known from its DynamoDB item.
+
+**The KMS Key of a Branch Key is mutable**:  
+A Branch Key's KMS Key is not fixed at creation.
+The Branch Key Storage changes for Mutations
+([aws-encryption-sdk-specification#287](https://github.com/awslabs/aws-encryption-sdk-specification/pull/287),
+branch `tony/bks-storage-mutations`,
+`changes/2025-01-17_key-store-storage-mutations/background.md`)
+add operations that "facilitate changing the properties of all items of a Branch Key";
+the MPL's `mutations/mutations` branch changes the KMS Key ARN of all items of a Branch Key
+(`Mutations(TerminalKmsArn := ...)`;
+`AwsCryptographyKeyStoreAdmin/test/Mutations/TestKmsArnChanged.dfy`).
+Thus,
+a mapping from KMS Keys to Branch Key IDs can become stale,
+and would need to be kept consistent with mutations.
+
+This is also why a Negative Cache Entry is bounded by the Negative TTL:
+a Denied Branch Key MAY be mutated to a KMS Key the Tenant does allow,
+and the Branch Key ID is retried once the Negative TTL expires.
+
+**It is an optimization**:  
+Each Branch Key ID is Denied on its own first failure regardless.
+
+### 10.1 Author's conclusion
+
+No;
+each Branch Key ID is Denied on its own.
+
 # Open Questions
 
 1. **The Negative TTL**:
    its default, and whether it is configured per factory or per Branch Key ID.
+
+   UPDATE: Configured per Tenant Keyring Factory; the default is 5 minutes.
 
 2. **The error a Cache Guard raises**:
    its type,
    and whether it carries the original KMS error code
    (for example, as an MPL `ComAmazonawsKms` error, or with the code in its message).
 
+   UPDATE: The Cache Guard passes through the error it received, as is
+   ([4.3](#43-a-cache-guard)).
+
 3. **Thread safety**:
    Negative Cache Entries are written by Tenant KMS Clients
    and read by Cache Guards,
    on any thread.
 
+   UPDATE: There is no reason the Tenant Keyring Factory,
+   and the objects it vends,
+   are not thread safe;
+   they MUST be (Requirement 8),
+   and this SHOULD be tested.
+
 4. **A Denial on encrypt versus decrypt**:
    whether a Denial on `GetActiveBranchKey` and on `GetBranchKeyVersion`
    are treated alike;
    Requirement 3 suggests they are.
+
+   UPDATE: They are treated the same ([4.3](#43-a-cache-guard)).
 
 # Consequences
 
