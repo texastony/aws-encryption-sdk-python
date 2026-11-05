@@ -19,6 +19,9 @@ permissions:
 jobs:
   codebuild-tests:
     name: AWS CodeBuild CI
+    # Forks have no CI_AWS_ROLE_ARN, nor the CodeBuild project; skip there,
+    # including this workflow's own push and schedule triggers.
+    if: github.repository_owner == 'aws'
     runs-on: ubuntu-latest
     strategy:
       matrix:

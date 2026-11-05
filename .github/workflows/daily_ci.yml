@@ -14,20 +14,20 @@ permissions:
 
 jobs:
   codebuild_batch:
-    # Don't run the cron builds on forks
-    if: github.event_name != 'schedule' || github.repository_owner == 'aws'
+    # Forks have no CI_AWS_ROLE_ARN, nor the CodeBuild project; skip there on every trigger.
+    if: github.repository_owner == 'aws'
     uses: ./.github/workflows/ci_codebuild_batch.yml
     secrets:
       CI_AWS_ROLE_ARN: ${{ secrets.CI_AWS_ROLE_ARN }}
   codebuild_tests:
-    # Don't run the cron builds on forks
-    if: github.event_name != 'schedule' || github.repository_owner == 'aws'
+    # Forks have no CI_AWS_ROLE_ARN, nor the CodeBuild project; skip there on every trigger.
+    if: github.repository_owner == 'aws'
     uses: ./.github/workflows/ci_codebuild-tests.yml
     secrets:
       CI_AWS_ROLE_ARN: ${{ secrets.CI_AWS_ROLE_ARN }}
   decrypt_oracle:
-    # Don't run the cron builds on forks
-    if: github.event_name != 'schedule' || github.repository_owner == 'aws'
+    # Pins Python 3.9, which the ubuntu-latest runner no longer provides; skip on forks.
+    if: github.repository_owner == 'aws'
     uses: ./.github/workflows/ci_decrypt-oracle.yaml
   static_analysis:
     # Don't run the cron builds on forks
@@ -55,7 +55,8 @@ jobs:
         test_vector_handler,
         tests
       ]
-    if: ${{ failure() }}
+    # Forks have no Slack webhook.
+    if: ${{ failure() && github.repository_owner == 'aws' }}
     uses: aws/aws-cryptographic-material-providers-library/.github/workflows/slack-notification.yml@main
     with:
       message: "Daily CI failed on `${{ github.repository }}`. View run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
