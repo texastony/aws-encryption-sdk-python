@@ -29,6 +29,8 @@ A failure, returned by AWS KMS,
 to decrypt a Branch Key on behalf of a Tenant,
 that is caused by the Tenant owned resources
 (the KMS Key, and its Key Policy or Grants)
+or by the Tenant's Credentials
+(expired, unrecognized, or not matching their signature),
 and that will not resolve by retrying.
 
 See [Design Question 5](#5-what-is-a-denial).
@@ -126,7 +128,9 @@ only by implementing the public, extendable interfaces
    for any version of the Branch Key.
 
 4. Only a [Denial](#5-what-is-a-denial) MUST create a Negative Cache Entry;
-   transient failures (throttling, server errors, timeouts, expired credentials) MUST NOT.
+   transient failures (throttling, server errors, timeouts) MUST NOT.
+   Expired, unrecognized, and mis-signed credentials are Denials
+   ([5.1](#51-expired-credentials-are-a-denial), [5.2](#52-unrecognized-and-mis-signed-credentials-are-denials)).
 
 5. The ESDK-Python and MPL source MUST NOT be changed;
    only their public, extendable interfaces MAY be implemented.
@@ -398,6 +402,9 @@ These KMS errors are Denials:
 | `KMSInvalidStateException` | The KMS Key is pending deletion, pending import, or otherwise unusable |
 | `NotFoundException` | The KMS Key does not exist |
 | `IncorrectKeyException` | The Branch Key was not encrypted under the KMS Key requested |
+| `ExpiredTokenException` | The Tenant's Credentials have expired; see [5.1](#51-expired-credentials-are-a-denial) |
+| `UnrecognizedClientException` | KMS does not recognize the access key id or the session token; see [5.2](#52-unrecognized-and-mis-signed-credentials-are-denials) |
+| `InvalidSignatureException` | The request's signature does not match the credentials' secret, or its timestamp; see [5.2](#52-unrecognized-and-mis-signed-credentials-are-denials) |
 
 These are not:
 
@@ -409,11 +416,126 @@ These are retried by the Shared Transport
 ([design.md 6](./design.md#6-retries)),
 and say nothing about the Tenant's resources.
 
-**Failures of the Tenant's credentials**:  
-`UnrecognizedClientException` SHOULD never happen;
-the credentials were issued for the Tenant.
-An expired security token SHOULD cause the Tenant's credentials to be refreshed,
-not the Branch Key ID to be Denied.
+### 5.1 Expired credentials are a Denial
+
+UPDATE: An earlier revision of this document,
+and of Requirement 4,
+treated expired credentials as transient,
+expecting them to cause the Tenant's Credentials to be refreshed.
+Nothing does so;
+they are a Denial.
+
+**botocore only refreshes credentials proactively**:  
+`RefreshableCredentials` checks its expiry whenever its credentials are read
+(`get_frozen_credentials()`),
+and refreshes them before they expire
+(`botocore/credentials.py`, `_refresh` and `_protected_refresh`):
+
+- within the advisory refresh window (15 minutes before expiry),
+  one caller refreshes without blocking others;
+  if the refresh fails, the current credentials keep being used
+- within the mandatory refresh window (10 minutes before expiry),
+  every caller blocks until a refresh succeeds;
+  if the refresh fails, the error is raised to the caller,
+  and no request is made
+
+**botocore never refreshes credentials reactively**:  
+No error code for an expired token
+(`ExpiredToken`, `ExpiredTokenException`, `RequestExpired`, `InvalidClientTokenId`)
+appears in botocore's source or its retry configuration (`data/_retry.json`);
+the standard retry mode treats none of them as transient or throttling.
+A request rejected for an expired token is neither retried nor followed by a refresh.
+
+The Tenant KMS Client reads the Tenant's Credentials on every attempt
+([design.md 8](./design.md#8-tenant-credentials)),
+and so is refreshed exactly as a boto3 client would be.
+
+**Thus, an expired token that reaches AWS KMS will not resolve by retrying**:  
+It means botocore's proactive refresh is absent or failing:
+
+- the credentials cannot be refreshed
+  (for example, `Credentials` constructed from an STS response, without a refresh function)
+- the refresh source has been failing through the advisory refresh window
+- the local clock disagrees with AWS,
+  so botocore believes the credentials have not expired
+
+In each case the next request fails identically,
+and,
+were it not a Denial,
+every request would call Amazon DynamoDB and AWS KMS,
+which this design exists to prevent.
+
+**Recovery is bounded by the Negative TTL**:  
+Once the cause is resolved
+(the refresh source recovers, the clock is corrected, the credentials are replaced),
+the Branch Key ID remains Denied until its Negative Cache Entry expires;
+at most the Negative TTL.
+
+**Each Branch Key ID is Denied on its own**:  
+Expired credentials affect every Branch Key ID the Tenant uses;
+as with [10](#10-should-a-notfoundexception-propagate-across-branch-key-ids),
+each Branch Key ID is Denied on its own first failure,
+rather than propagating the Denial across a Tenant's Branch Key IDs.
+
+_Note_: `ExpiredTokenException` (HTTP 400) is the error AWS's common errors documentation lists
+for an expired security token;
+the error code AWS KMS returns for one SHOULD be confirmed during implementation.
+
+### 5.2 Unrecognized and mis-signed credentials are Denials
+
+UPDATE: An earlier revision of this document
+excluded `UnrecognizedClientException`,
+as it SHOULD never happen for credentials issued for the Tenant.
+That remains true of correctly wired credentials;
+but when it does happen,
+it will not resolve by retrying,
+which is the property that makes a failure a Denial.
+
+The author probed AWS KMS (`us-west-2`, `GenerateDataKey`)
+through the Tenant KMS Client,
+varying one part of the credentials at a time:
+
+| Credentials | AWS KMS error |
+| ----------- | ------------- |
+| An access key id that does not exist | `UnrecognizedClientException` |
+| Long term keys, with a bogus session token | `UnrecognizedClientException` |
+| Temporary credentials, without their session token | `UnrecognizedClientException` |
+| Temporary credentials, with a corrupted session token | `UnrecognizedClientException` |
+| A real access key id, with the wrong secret | `InvalidSignatureException` |
+| Temporary credentials, with the wrong secret | `InvalidSignatureException` |
+| Valid temporary credentials (`sts:GetSessionToken`) | success |
+
+**`UnrecognizedClientException`**:  
+AWS KMS does not recognize the access key id or the session token:
+an access key id that was never issued, or was deleted;
+a session token that is bogus, corrupted, or attached to long term keys;
+or temporary credentials whose session token was dropped.
+AWS also documents this error for session tokens issued by the global STS endpoint
+(version 1 tokens, by default)
+when used in a Region that must be enabled (opt-in Regions);
+the author did not test this.
+
+**`InvalidSignatureException`**:  
+The request's signature does not match the credentials' secret access key.
+AWS also documents this error for a request whose timestamp is too far from AWS's clock
+(clock skew);
+the author did not test this.
+
+**These are usually the application's, not the Tenant's**:  
+Unlike the KMS Key Denials,
+these are most often caused by how the application obtains,
+stores,
+or passes the Tenant's Credentials,
+or by its clock.
+Negative caching does not fix them;
+it stops every request from calling Amazon DynamoDB and AWS KMS,
+and,
+as the Cache Guard passes through the error it received
+([4.3](#43-a-cache-guard)),
+the cause remains visible.
+
+**Each Branch Key ID is Denied on its own**:  
+as in [5.1](#51-expired-credentials-are-a-denial).
 
 ## 6 Why the Branch Key ID, and not the KMS Key ARN?
 
