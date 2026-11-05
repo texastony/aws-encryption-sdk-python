@@ -477,9 +477,14 @@ as with [10](#10-should-a-notfoundexception-propagate-across-branch-key-ids),
 each Branch Key ID is Denied on its own first failure,
 rather than propagating the Denial across a Tenant's Branch Key IDs.
 
-_Note_: `ExpiredTokenException` (HTTP 400) is the error AWS's common errors documentation lists
-for an expired security token;
-the error code AWS KMS returns for one SHOULD be confirmed during implementation.
+**AWS KMS returns `ExpiredTokenException`**:  
+The author signed an AWS KMS `GenerateDataKey` request,
+through the Tenant KMS Client,
+with temporary credentials from `sts:GetSessionToken`
+one minute after they expired;
+AWS KMS returned HTTP 400,
+`ExpiredTokenException`:
+"The security token included in the request is expired".
 
 ### 5.2 Unrecognized and mis-signed credentials are Denials
 
