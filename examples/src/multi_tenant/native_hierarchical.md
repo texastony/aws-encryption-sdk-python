@@ -124,6 +124,9 @@ This is the trade this document weighs.
    including on free threaded CPython
    ([8](#8-verification)).
 
+9. The native Branch Key reader MUST offer strongly consistent reads, as an option
+   ([4.1](#41-read-consistency)).
+
 # Out of Scope
 
 - Creating, versioning, and mutating Branch Keys:
@@ -270,6 +273,59 @@ It MUST implement the AWS KMS Key Store's read path
 The MPL's static test Branch Keys, including the lying Branch Key,
 and its `TestLyingBranchKey.dfy` and `TestDiscoveryGetKeys.dfy` cases,
 SHOULD be ported as tests.
+
+### 4.1 Read consistency
+
+The MPL's AWS KMS Key Store reads eventually consistently:
+its `GetItem` requests leave `ConsistentRead` unset
+(`DDBKeystoreOperations.dfy`),
+and it offers no option to change that.
+This is a common complaint of high throughput services.
+
+**What eventually consistent reads cost them**:  
+a read shortly after a write may not see it.
+In particular:
+
+- after `CreateKey`, a `GetActiveBranchKey` on another host
+  may find no ACTIVE item, and fail, though the Branch Key exists;
+  so a Tenant's first request after onboarding can fail
+- after `VersionKey`, a `GetActiveBranchKey` may still return the previous version,
+  so new messages are encrypted under it
+- a message encrypted under a new version,
+  decrypted on another host before the version item is visible there,
+  fails `GetBranchKeyVersion`
+
+**Decision**:  
+the native reader takes a `consistent_read` option, applied to every `GetItem` it makes:
+
+- `False`, the default, as the MPL's AWS KMS Key Store reads
+- `True`, strongly consistent reads, for applications that create or version Branch Keys
+  and use them at once, on any host
+
+It is configured per Tenant MKP Factory,
+so every Tenant's reader in a process reads the same way.
+
+**What it does not change**:  
+
+- Only Fetches read DynamoDB.
+  An entry already in the Branch Key Cache is served until it expires,
+  so after `VersionKey`, a host keeps encrypting under the version it cached,
+  for up to the cache's TTL, whatever the consistency.
+  Strongly consistent reads make each Fetch current;
+  the cache's TTL bounds how stale an entry can be.
+- A strongly consistent read costs twice the read capacity of an eventually consistent one,
+  per Fetch; Fetches are rare, so this is usually small.
+- On a DynamoDB global table,
+  a strongly consistent read is consistent only with writes made in the same Region's replica;
+  a Branch Key created in another Region may still not be visible.
+- A strongly consistent read MAY fail where an eventually consistent one would not,
+  for example while a partition is unavailable;
+  such failures are DynamoDB's, not AWS KMS's,
+  so they are not Denials, and are not negatively cached
+  ([negative_caching.md, Out of Scope](./negative_caching.md#why-not-amazon-dynamodb-failures)).
+
+The interoperability tests MUST run with both settings,
+and a test MUST assert each `GetItem`'s `ConsistentRead` parameter.
 
 ## 5 Thread safety
 
@@ -464,6 +520,9 @@ the native path's MUST be tested:
    (`ConsistentRead` unset, `DDBKeystoreOperations.dfy`);
    the native reader SHOULD match it, unless an application needs a rotated Branch Key's
    new ACTIVE version seen at once, which a strongly consistent read costs twice as much for.
+
+   UPDATE: The native reader offers strongly consistent reads, as an option;
+   the default matches the MPL ([4.1](#41-read-consistency)).
 
 4. **Supported Python versions**: the ESDK supports 3.8;
    free threaded CPython is 3.13 and later;
