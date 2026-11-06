@@ -53,22 +53,41 @@ def default_storm_tracking_cache():
     """Returns the default settings of the storm tracking cache a factory creates and shares.
 
     The values, and why, are design.md 10.1.1.
-    These are illustrative; applications SHOULD tune every one of them to their own usage pattern.
+    These are illustrative; applications SHOULD tune every one of them to their own usage pattern:
+    the number of Tenants, how many miss the cache at once, Branch Key TTLs, and DynamoDB and KMS latency.
+
+    Requires aws-cryptographic-material-providers 1.11.3 or later; earlier Python releases sleep
+    sleep_milli seconds, not milliseconds, whenever fan_out is reached (MPL issue #1940).
 
     :rtype: aws_cryptographic_material_providers.mpl.models.StormTrackingCache
     """
     return StormTrackingCache(
-        # Maximum Branch Keys cached, across every Tenant.
+        # Maximum Branch Keys cached, across every Tenant; not per Tenant.
+        # Size it for the number of Tenants times the Branch Keys each has in use. The MPL default.
         entry_capacity=1000,
+        # Entries evicted at a time when the cache is full. The MPL default.
         entry_pruning_tail_size=1,
+        # Begin refreshing an entry this long before it expires; until then, other requests keep using it.
+        # The MPL default; it MUST be less than the keyrings' ttl_seconds, which the factory enforces.
         grace_period=10_000,
+        # Within the grace period, at most one request per interval is sent to refresh an entry. The MPL default.
         grace_interval=1_000,
-        # Shared by every Tenant: the MPL default of 20 would serialize a burst of Tenants missing at once.
+        # Maximum number of distinct Branch Keys being fetched at once, across every Tenant.
+        # Once it is reached, a caller whose Branch Key has no cached entry blocks.
+        # The MPL default of 20 suits a cache per keyring; shared by every Tenant,
+        # it would serialize a burst of Tenants missing the cache at once (e.g. at startup).
         fan_out=100,
-        # A failed fetch holds its fan out slot this long; lowered from the MPL default of 10 seconds.
+        # How long a fetch counts against fan_out. The keyring only marks a fetch complete when it succeeds,
+        # so a failed fetch holds its slot this long. Lowered from the MPL default of 10 seconds,
+        # so a Tenant whose fetches fail (e.g. revoked credentials) cannot hold slots the others need for long.
+        # SHOULD exceed a typical DynamoDB plus KMS fetch, including retries;
+        # a fetch that takes longer may be duplicated by another request.
         in_flight_ttl=5_000,
+        # How long a blocked caller sleeps before checking the cache again, always in milliseconds. The MPL default.
         sleep_milli=20,
-        # MUST be set: a StormTrackingCache defaults to seconds.
+        # The unit of grace_period, grace_interval, and in_flight_ttl.
+        # MUST be set: StormTrackingCache defaults to seconds, unlike the MPL's DefaultCache.
+        # The MPL also requires grace_interval <= in_flight_ttl <= grace_period.
         time_units=TimeUnits.MILLISECONDS,
     )
 

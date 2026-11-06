@@ -30,6 +30,7 @@ from ...src.multi_tenant.tenant_keyring_factory import (
     default_storm_tracking_cache,
     tenant_partition_id,
 )
+from ...src.multi_tenant_hierarchical_keyring_example import denied_kms_error
 from . import fake_kms
 from .helpers import FakeClock, kms_error
 from .keyring_helpers import branch_key_materials, decrypt_cache_id, encrypt_cache_id, put_input
@@ -242,6 +243,14 @@ def test_vended_keyring_is_guarded_by_its_negative_cache(factory, remote_calls, 
         esdk.encrypt(source=b"tenant data", keyring=keyring)
     assert excinfo.value.obj is error
     assert_no_remote_calls(remote_calls)
+    # The example's documented way to unwrap it.
+    assert denied_kms_error(excinfo.value) is error
+    assert denied_kms_error(excinfo.value).response["Error"]["Code"] == "AccessDeniedException"
+
+
+def test_denied_kms_error_is_none_for_other_errors():
+    assert denied_kms_error(ValueError("not a Denial")) is None
+    assert denied_kms_error(OpaqueWithTextError(obj=ValueError("not from AWS KMS"), obj_message="x")) is None
 
 
 def test_keyrings_vended_for_one_tenant_and_branch_key_share_a_denial(factory, remote_calls, esdk):

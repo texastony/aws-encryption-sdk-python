@@ -141,19 +141,27 @@ def test_multi_tenant_example_end_to_end(monkeypatch, ddb, kms, table):
     client, _ = ddb
     transport, fake = kms
     monkeypatch.setattr(example, "KmsTransport", lambda: transport)
-    branch_key_ids = {}
+    branch_key_ids = {
+        "TenantA": "esdk-python-example-tenant-A-{}".format(uuid.uuid4()),
+        "TenantB": "esdk-python-example-tenant-B-{}".format(uuid.uuid4()),
+    }
     try:
         example.encrypt_and_decrypt_with_keyring(
             key_store_table_name=table,
             logical_key_store_name=table,
             tenant_kms_key_ids={"TenantA": KEY_A, "TenantB": KEY_B},
             tenant_credentials={"TenantA": TENANT_A, "TenantB": TENANT_B},
-            branch_key_ids=branch_key_ids,
+            tenant_branch_key_ids=branch_key_ids,
         )
+        # Each Branch Key has the ID the application assigned, and the tenant in its encryption context.
+        for tenant, branch_key_id in branch_key_ids.items():
+            active = client.get_item(
+                TableName=table, Key={"branch-key-id": {"S": branch_key_id}, "type": {"S": "branch:ACTIVE"}}
+            )["Item"]
+            assert active["aws-crypto-ec:tenant"] == {"S": tenant}
     finally:
         assert not cleanup_branch_keys(client, table, branch_key_ids)
 
-    assert set(branch_key_ids) == {"TenantA", "TenantB"}
     # Per tenant: create its Branch Key, then a cache miss on encrypt (active) and on decrypt (version);
     # every request signed with that tenant's credentials.
     per_tenant = [
