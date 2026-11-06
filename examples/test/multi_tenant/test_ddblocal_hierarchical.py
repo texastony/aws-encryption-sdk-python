@@ -27,6 +27,7 @@ from aws_cryptographic_material_providers.keystore.models import (
 )
 from aws_cryptographic_material_providers.mpl import AwsCryptographicMaterialProviders
 from aws_cryptographic_material_providers.mpl.config import MaterialProvidersConfig
+from aws_cryptographic_material_providers.mpl.errors import OpaqueWithTextError
 from aws_cryptographic_material_providers.mpl.models import CreateAwsKmsHierarchicalKeyringInput
 from botocore.credentials import Credentials
 
@@ -35,8 +36,10 @@ from aws_encryption_sdk import CommitmentPolicy
 
 from ...src import multi_tenant_hierarchical_keyring_example as example
 from ...src.multi_tenant import KmsTransport, TenantKmsClient
+from ...src.multi_tenant.tenant_keyring_factory import TenantKeyringFactory
 from ..branch_key_cleanup import cleanup_branch_keys, delete_branch_key
 from . import fake_kms
+from .helpers import FakeClock
 
 pytestmark = [pytest.mark.ddblocal]
 
@@ -204,5 +207,67 @@ def test_without_negative_caching_every_denied_attempt_calls_dynamodb_and_kms(dd
                 esdk.encrypt(source=b"tenant data", keyring=keyring)
         assert calls["GetItem"] == 3
         assert [(r["operation"], r["access_key"]) for r in fake.requests] == [("Decrypt", "AKIATENANTB")] * 3
+    finally:
+        assert delete_branch_key(client, table, branch_key_id) is True
+
+
+def test_negative_caching_end_to_end(ddb, kms, table):  # pylint: disable=too-many-locals
+    """Negative caching, end to end (negative_caching.md).
+
+    Denied on a real cache miss, the Denial is recorded, enforced with no DynamoDB or KMS calls,
+    and retried once the Negative TTL expires.
+    """
+    client, calls = ddb
+    transport, fake = kms
+    branch_key_id = key_store(client, table, transport, TENANT_A, KEY_A).create_key(
+        input=CreateKeyInput()
+    ).branch_key_identifier
+    clock = FakeClock()
+    factory = TenantKeyringFactory(
+        transport=transport,
+        ddb_client=client,
+        ddb_table_name=table,
+        logical_key_store_name=table,
+        kms_configuration=KMSConfigurationKmsKeyArn(value=KEY_A),
+        region_name=REGION,
+        negative_ttl=60,
+        clock=clock,
+    )
+    esdk = aws_encryption_sdk.EncryptionSDKClient(commitment_policy=CommitmentPolicy.REQUIRE_ENCRYPT_REQUIRE_DECRYPT)
+    fake.requests.clear()
+    calls.clear()
+    try:
+        # Tenant B, misconfigured with tenant A's Branch Key: the fake KMS denies tenant B KEY_A.
+        denied = factory.keyring_for("tenant-b", branch_key_id, TENANT_B)
+
+        # 1. The first request misses the cache: DynamoDB GetItem, then kms:Decrypt, which is Denied.
+        with pytest.raises(Exception, match="AccessDeniedException"):  # pylint: disable=broad-except
+            esdk.encrypt(source=b"tenant data", keyring=denied)
+        assert calls["GetItem"] == 1 and [r["operation"] for r in fake.requests] == ["Decrypt"]
+        negative = factory.negative_cache_for("tenant-b", branch_key_id)
+        assert negative.get().error.response["Error"]["Code"] == "AccessDeniedException"
+
+        # 2. Every later request, through any keyring for the Tenant and Branch Key ID, fails without a call.
+        for keyring in (denied, factory.keyring_for("tenant-b", branch_key_id, TENANT_B)):
+            with pytest.raises(OpaqueWithTextError) as excinfo:
+                esdk.encrypt(source=b"tenant data", keyring=keyring)
+            assert excinfo.value.obj is negative.get().error
+        assert calls["GetItem"] == 1 and len(fake.requests) == 1
+
+        # 3. Once the Negative TTL expires, one request is retried; still Denied, and recorded again.
+        clock.now += 60
+        with pytest.raises(Exception, match="AccessDeniedException"):  # pylint: disable=broad-except
+            esdk.encrypt(source=b"tenant data", keyring=denied)
+        assert calls["GetItem"] == 2 and len(fake.requests) == 2
+        assert negative.get() is not None
+
+        # 4. The Tenant that owns the Branch Key is unaffected (Requirement 2, and per Tenant).
+        owner = factory.keyring_for("tenant-a", branch_key_id, TENANT_A)
+        ciphertext, _ = esdk.encrypt(source=b"tenant data", keyring=owner)
+        assert esdk.decrypt(source=ciphertext, keyring=owner)[0] == b"tenant data"
+        assert [(r["operation"], r["access_key"]) for r in fake.requests[2:]] == [
+            ("Decrypt", "AKIATENANTA"),
+            ("Decrypt", "AKIATENANTA"),
+        ]
     finally:
         assert delete_branch_key(client, table, branch_key_id) is True

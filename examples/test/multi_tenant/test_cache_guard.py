@@ -7,17 +7,14 @@ The end-to-end tests seed the shared cache under the cache identifiers the speci
 from cache hits; any call to Amazon DynamoDB or AWS KMS is counted, and asserted to be zero.
 """
 # pylint: disable=redefined-outer-name
-import hashlib
-import os
 import threading
-import time
 import uuid
 
 import boto3
 import pytest
 from aws_cryptographic_material_providers.keystore import KeyStore
 from aws_cryptographic_material_providers.keystore.config import KeyStoreConfig
-from aws_cryptographic_material_providers.keystore.models import BranchKeyMaterials, KMSConfigurationKmsKeyArn
+from aws_cryptographic_material_providers.keystore.models import KMSConfigurationKmsKeyArn
 from aws_cryptographic_material_providers.mpl import AwsCryptographicMaterialProviders
 from aws_cryptographic_material_providers.mpl.config import MaterialProvidersConfig
 from aws_cryptographic_material_providers.mpl.errors import EntryDoesNotExist, OpaqueWithTextError
@@ -29,8 +26,6 @@ from aws_cryptographic_material_providers.mpl.models import (
     DefaultCache,
     DeleteCacheEntryInput,
     GetCacheEntryInput,
-    MaterialsBranchKey,
-    PutCacheEntryInput,
     UpdateUsageMetadataInput,
 )
 from aws_cryptographic_material_providers.mpl.references import ICryptographicMaterialsCache
@@ -45,6 +40,7 @@ from ...src.multi_tenant.cache_guard import CacheGuard
 from ...src.multi_tenant.negative_cache import BranchKeyNegativeCache
 from . import fake_kms
 from .helpers import FakeClock, kms_error
+from .keyring_helpers import branch_key_materials, decrypt_cache_id, denial_within, encrypt_cache_id, put_input
 
 # Offline: no network access, so these also run as local tests (tox: mplexampleslocal).
 pytestmark = [pytest.mark.examples, pytest.mark.local]
@@ -80,47 +76,6 @@ class SpyCache(ICryptographicMaterialsCache):
     def delete_cache_entry(self, param):
         """Record."""
         self.calls.append(("delete", param))
-
-
-def branch_key_materials(branch_key_id, version):
-    return BranchKeyMaterials(
-        branch_key_identifier=branch_key_id,
-        branch_key_version=version,
-        encryption_context={},
-        branch_key=os.urandom(32),
-    )
-
-
-def put_input(identifier, materials, now=None):
-    now = int(time.time()) if now is None else now
-    return PutCacheEntryInput(
-        identifier=identifier,
-        materials=MaterialsBranchKey(value=materials),
-        creation_time=now,
-        expiry_time=now + 600,
-        messages_used=0,
-        bytes_used=0,
-    )
-
-
-def denial_within(raised):
-    """Return the Cache Guard's OpaqueWithTextError within ``raised``, or None.
-
-    On encrypt, the ESDK raises it; on decrypt, it is within the MPL's CollectionOfErrors,
-    within the ESDK's AWSEncryptionSDKClientError (negative_caching.md 4.3).
-    """
-    pending, seen = [raised], set()
-    while pending:
-        error = pending.pop()
-        if id(error) in seen:
-            continue
-        seen.add(id(error))
-        if isinstance(error, OpaqueWithTextError):
-            return error
-        for attribute in ("list", "args"):
-            value = getattr(error, attribute, None) or ()
-            pending.extend(child for child in value if isinstance(child, BaseException))
-    return None
 
 
 @pytest.fixture
@@ -309,28 +264,15 @@ def test_thread_safety():
 # End to end: a real Hierarchical Keyring, with the Cache Guard as its CacheTypeShared cache.
 
 
-def encrypt_cache_id(partition_id, logical_key_store_name, branch_key_id):
-    """aws-kms-hierarchical-keyring.md, Appendix A, Encryption Materials."""
-    return hashlib.sha384(
-        b"\x02\x00\x01\x00" + partition_id.encode() + b"\x00" + logical_key_store_name.encode()
-        + b"\x00" + branch_key_id.encode()
-    ).digest()
-
-
-def decrypt_cache_id(partition_id, logical_key_store_name, branch_key_id, version):
-    """aws-kms-hierarchical-keyring.md, Appendix A, Decryption Materials."""
-    return hashlib.sha384(
-        b"\x02\x00\x02\x00" + partition_id.encode() + b"\x00" + logical_key_store_name.encode()
-        + b"\x00" + branch_key_id.encode() + b"\x00" + version.encode()
-    ).digest()
-
-
 @pytest.fixture
 def remote_calls():
     """Count every DynamoDB and KMS request the keyring makes; the tests assert there are none."""
     ddb = boto3.client("dynamodb", region_name="us-west-2", aws_access_key_id="AKIAFAKE", aws_secret_access_key="x")
     ddb_calls = []
-    ddb.meta.events.register("before-call.dynamodb", lambda **kwargs: ddb_calls.append(kwargs["model"].name))
+    ddb.meta.events.register(
+        # provide-client-params: the first event, before the Stubber rejects an unstubbed call
+        "provide-client-params.dynamodb", lambda **kwargs: ddb_calls.append(kwargs["model"].name)
+    )
     transport = KmsTransport()
     kms = fake_kms.install(transport)
     with Stubber(ddb):  # no responses queued: a DynamoDB call fails, and is counted

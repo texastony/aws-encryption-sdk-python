@@ -120,7 +120,9 @@ only by implementing the public, extendable interfaces
    until the Negative TTL expires.
 
 2. A Denial for a Branch Key ID MUST NOT affect any other Branch Key ID,
-   including Branch Key IDs protected by the same KMS Key.
+   including Branch Key IDs protected by the same KMS Key;
+   nor the same Branch Key ID for any other Tenant
+   ([7.2](#72-a-tenant-keyring-factory)).
 
 3. While a Negative Cache Entry is honored,
    the Branch Key ID's cached materials MUST NOT be used,
@@ -646,6 +648,15 @@ and the Tenant KMS Client records a Denial against that Branch Key ID.
 Where the request's encryption context includes `branch-key-id`,
 the Tenant KMS Client SHOULD check it matches.
 
+UPDATE: Hierarchy version 2 was never shipped;
+hierarchy version 1 is the only hierarchy version,
+and the AWS KMS Key Store's `Decrypt` always includes `branch-key-id`.
+The Branch Key ID is still bound rather than parsed:
+the Cache Guard needs it before any request is made,
+and the binding does not depend on the encryption context's format.
+The Tenant KMS Client checks the `branch-key-id`,
+and its source says it assumes hierarchy version 1.
+
 As a Tenant KMS Client is a few references
 ([design.md, Tenant KMS Client](./design.md#tenant-kms-client)),
 one per Tenant Hierarchical Keyring,
@@ -686,24 +697,54 @@ One per process.
 It holds:
 
 - the Shared Transport
-- the shared cache
+- the storm tracking cache shared by every Tenant, which it creates
 - the DynamoDB client
 - the AWS KMS Key Store configuration,
   other than the KMS client
   (table name, Logical Key Store Name, AWS KMS Configuration, grant tokens)
+- the cache limit TTL of the keyrings it vends (default 10 minutes)
 - the Negative TTL (default 5 minutes)
 
-Given a Branch Key ID,
-the Tenant's Credentials,
-and a stable Tenant identity ([8](#8-the-partition-id-revisited)),
+**The factory creates the shared cache**:  
+It takes the storm tracking cache's settings
+(default: those of [design.md 10.1.1](./design.md#1011-why-not-the-mpls-defaultcache)),
+rather than a cache,
+and creates the cache itself.
+The specification requires the storm tracking cache's grace period
+be less than the Hierarchical Keyring's cache limit TTL
+(`framework/aws-kms/aws-kms-hierarchical-keyring.md`, Initialization);
+only the factory knows both,
+so only it can enforce this.
+It also prevents a cache that is not a storm tracking cache,
+or whose time units were not set,
+from being shared by every Tenant.
+The shared cache is exposed, read only, to the application and to tests.
+
+Given a Tenant's identifier,
+a Branch Key ID,
+and the Tenant's Credentials,
 it vends a Tenant Hierarchical Keyring,
 built with:
 
-- a Tenant KMS Client, bound to the Branch Key ID
+- a Tenant KMS Client, recording Denials in the negative cache of that Tenant and Branch Key ID
 - an AWS KMS Key Store, using that Tenant KMS Client
-- a Cache Guard, bound to the Branch Key ID, delegating to the shared cache
+- a Cache Guard, enforcing that negative cache, delegating to the shared cache
 - the Branch Key ID, statically
-- a Partition ID derived from the stable Tenant identity
+- the Tenant's identifier, as is, as the Partition ID ([8](#8-the-partition-id-revisited))
+
+**Negative caches are per Tenant and Branch Key ID**:  
+The factory holds one negative cache per Tenant and Branch Key ID,
+and every keyring it vends for that Tenant and Branch Key ID shares it;
+so a Denial recorded through one is enforced by all.
+
+UPDATE: An earlier revision of this document keyed negative caches by Branch Key ID alone.
+Then,
+a Tenant misconfigured with another Tenant's Branch Key ID,
+and so Denied by AWS KMS,
+would deny that Branch Key ID to the Tenant that owns it;
+one Tenant's misconfiguration MUST NOT deny another Tenant (Requirement 2).
+The shared cache is already partitioned by Tenant ([8](#8-the-partition-id-revisited));
+the negative caches now are too.
 
 **This changes the guidance of [design.md 10](./design.md#10-the-hierarchical-keyring)**:  
 which offers a Branch Key ID Supplier as the simpler multi-tenant design
@@ -759,6 +800,9 @@ The Partition ID SHOULD be derived from a stable Tenant identity
 supplied to the Tenant Keyring Factory,
 rather than from the Tenant's Credentials.
 
+UPDATE: The Partition ID is the Tenant's identifier, as is;
+it is not a secret, so there is no reason to digest it.
+
 As with any cache,
 a revoked KMS authorization is not noticed until a cached entry expires;
 once a fetch is Denied,
@@ -766,6 +810,55 @@ the Cache Guard enforces it (Requirement 3).
 
 UPDATE: The fix to the existing example is deferred to a later change;
 [design.md 10.2](./design.md#102-the-partition-id) records this.
+
+**The Tenant identifier is the authorization boundary of cached materials**:  
+The shared cache's entries are identified by
+the Partition ID,
+the Logical Key Store Name,
+and the Branch Key ID
+([Appendix A](https://github.com/awslabs/aws-encryption-sdk-specification/blob/master/framework/aws-kms/aws-kms-hierarchical-keyring.md#appendix-a-cache-entry-identifier-formulas));
+not by the credentials.
+Thus,
+a keyring vended for a Tenant identifier and Branch Key ID
+is served the materials cached by any earlier keyring
+vended for the same pair,
+whatever credentials either was vended with,
+until the entry expires or is Denied.
+
+Vended keyrings are a few references
+around the MPL's formally verified Hierarchical Keyring;
+applications need not cache them,
+and MAY vend one per request or per tenant connection.
+An application that does
+relies on each new keyring,
+built with fresh credentials,
+being served the entries of the keyrings before it.
+
+This is a security decision of this design:
+the consuming application's choice of Tenant identifier and Branch Key ID
+is critical.
+The application MUST pass the Tenant Keyring Factory
+the identifier of the Tenant it authenticated,
+never one taken from the request,
+and the Branch Key ID it assigned to that Tenant.
+
+**An alternative: the credentials as the Partition ID**:  
+A Partition ID derived from the credentials,
+as [design.md 10.2](./design.md#102-the-partition-id) does,
+would make the credentials the boundary:
+a keyring would be served only the entries
+fetched with its own credentials.
+To keep the cache from holding materials
+for credentials no longer in use,
+the Tenant Keyring Factory would additionally
+delete a Branch Key's entries from the shared cache
+when AWS KMS Denies it,
+and when a vended keyring is cleaned up
+(for example, on its tenant connection closing).
+Its cost is
+the cache miss per credential refresh described above,
+and a vended keyring the application MUST clean up.
+This design does not take it.
 
 ## 9 The storm tracking cache
 
@@ -862,6 +955,18 @@ each Branch Key ID is Denied on its own.
    Requirement 3 suggests they are.
 
    UPDATE: They are treated the same ([4.3](#43-a-cache-guard)).
+
+5. **Contention on the Tenant Keyring Factory's lock**:
+   `negative_cache_for` takes one lock, per factory,
+   to look up or create a Tenant and Branch Key ID's negative cache;
+   the Key Store and keyring are built outside it.
+   At service startup,
+   a burst of keyrings vended at once contends on it.
+   If that matters,
+   a partitioned (striped) map,
+   like that behind Guava's cache,
+   would spread it.
+   A stress test on the factory SHOULD decide.
 
 # Consequences
 

@@ -7,6 +7,7 @@ import pytest
 from botocore.credentials import Credentials
 
 from ...src.multi_tenant import KmsTransport, TenantKmsClient
+from ...src.multi_tenant.negative_cache import DENIAL_ERROR_CODES, BranchKeyNegativeCache
 from ...src.multi_tenant.tenant_kms_client import METHOD_TO_API_MAPPING
 from . import fake_kms
 
@@ -136,3 +137,106 @@ def test_invalid_construction(transport, kwargs, error):
     kwargs.setdefault("transport", transport)
     with pytest.raises(error):
         TenantKmsClient(**kwargs)
+
+
+# Recording Denials (negative_caching.md 3.3, 6).
+
+
+@pytest.fixture
+def negative():
+    return BranchKeyNegativeCache("bk-a")
+
+
+def _guarded_client(transport, credentials, negative):
+    return TenantKmsClient(
+        transport=transport, region_name="us-west-2", credentials=credentials, negative_cache=negative
+    )
+
+
+def _ciphertext_under(client_a, encryption_context):
+    response = client_a.encrypt(KeyId=KEY_A, Plaintext=b"branch key", EncryptionContext=encryption_context)
+    return response["CiphertextBlob"]
+
+
+@pytest.mark.usefixtures("kms")  # installs the fake KMS on the transport
+def test_a_decrypt_denial_is_recorded_as_the_same_error(transport, client_a, negative):
+    ciphertext = _ciphertext_under(client_a, {"branch-key-id": "bk-a"})
+    client_b = _guarded_client(transport, TENANT_B, negative)  # tenant B's credentials cannot use KEY_A
+    with pytest.raises(botocore.exceptions.ClientError) as excinfo:
+        client_b.decrypt(CiphertextBlob=ciphertext, EncryptionContext={"branch-key-id": "bk-a"})
+    assert excinfo.value.response["Error"]["Code"] == "AccessDeniedException"
+    assert negative.get() is not None
+    assert negative.get().error is excinfo.value  # recorded, and re-raised, as is
+
+
+@pytest.mark.parametrize("code", sorted(DENIAL_ERROR_CODES))
+def test_every_denial_code_on_decrypt_is_recorded(transport, kms, negative, code):
+    kms.scripted = [fake_kms.FakeResponse(400, {"__type": "com.amazonaws.kms#" + code, "message": "denied"})]
+    client = _guarded_client(transport, TENANT_A, negative)
+    with pytest.raises(botocore.exceptions.ClientError):
+        client.decrypt(CiphertextBlob=b"x", EncryptionContext={"branch-key-id": "bk-a"})
+    assert negative.get().error.response["Error"]["Code"] == code
+
+
+@pytest.mark.parametrize("failure", [
+    fake_kms.FakeResponse(400, {"__type": "ThrottlingException", "message": "slow down"}),
+    fake_kms.FakeResponse(500, {"__type": "KMSInternalException", "message": "oops"}),
+])
+def test_transient_failures_are_not_recorded(transport, kms, negative, failure):
+    kms.scripted = [failure] * 3  # every attempt
+    client = _guarded_client(transport, TENANT_A, negative)
+    with pytest.raises(botocore.exceptions.ClientError):
+        client.decrypt(CiphertextBlob=b"x", EncryptionContext={"branch-key-id": "bk-a"})
+    assert negative.get() is None
+
+
+@pytest.mark.parametrize("method, params", [
+    ("generate_data_key", {"KeyId": KEY_A, "NumberOfBytes": 32}),
+    ("generate_data_key_without_plaintext", {"KeyId": KEY_A, "NumberOfBytes": 32}),
+    ("encrypt", {"KeyId": KEY_A, "Plaintext": b"x"}),
+    ("re_encrypt", {"CiphertextBlob": b"x", "DestinationKeyId": KEY_A}),
+])
+def test_denials_of_other_operations_are_not_recorded(transport, kms, negative, method, params):
+    # A Denial is a failure to decrypt a Branch Key; creating or versioning one is not that.
+    kms.scripted = [fake_kms.FakeResponse(400, {"__type": "AccessDeniedException", "message": "denied"})]
+    client = _guarded_client(transport, TENANT_A, negative)
+    with pytest.raises(botocore.exceptions.ClientError):
+        getattr(client, method)(**params)
+    assert negative.get() is None
+
+
+def test_a_denial_of_another_branch_key_id_is_not_recorded(transport, kms, negative):
+    kms.scripted = [fake_kms.FakeResponse(400, {"__type": "AccessDeniedException", "message": "denied"})]
+    client = _guarded_client(transport, TENANT_A, negative)
+    with pytest.raises(botocore.exceptions.ClientError):
+        client.decrypt(CiphertextBlob=b"x", EncryptionContext={"branch-key-id": "bk-other"})
+    assert negative.get() is None
+
+
+@pytest.mark.parametrize("encryption_context", [None, {}, {"aws-crypto-ec:department": "admin"}])
+def test_a_denial_without_a_branch_key_id_in_the_encryption_context_is_recorded(
+    transport, kms, negative, encryption_context
+):
+    # The AWS KMS Key Store always includes branch-key-id (hierarchy version 1, the only one shipped);
+    # without it, the Denial is attributed to the Branch Key ID the client is bound to.
+    kms.scripted = [fake_kms.FakeResponse(400, {"__type": "AccessDeniedException", "message": "denied"})]
+    client = _guarded_client(transport, TENANT_A, negative)
+    params = {"CiphertextBlob": b"x"}
+    if encryption_context is not None:
+        params["EncryptionContext"] = encryption_context
+    with pytest.raises(botocore.exceptions.ClientError):
+        client.decrypt(**params)
+    assert negative.get() is not None
+
+
+def test_without_a_negative_cache_nothing_is_recorded_and_the_error_is_unchanged(kms, client_a):
+    kms.scripted = [fake_kms.FakeResponse(400, {"__type": "AccessDeniedException", "message": "denied"})]
+    assert client_a.negative_cache is None
+    with pytest.raises(botocore.exceptions.ClientError) as excinfo:
+        client_a.decrypt(CiphertextBlob=b"x")
+    assert excinfo.value.response["Error"]["Code"] == "AccessDeniedException"
+
+
+def test_negative_cache_must_be_a_branch_key_negative_cache(transport):
+    with pytest.raises(TypeError):
+        TenantKmsClient(transport=transport, region_name="us-west-2", credentials=TENANT_A, negative_cache=object())

@@ -88,6 +88,22 @@ def is_denial(error):
     return error_code(error) in DENIAL_ERROR_CODES
 
 
+def validate_negative_ttl(negative_ttl):
+    """Rejects a Negative TTL that is not a number greater than zero.
+
+    :param float negative_ttl: Seconds a Negative Cache Entry is honored
+    :raises ValueError: if ``negative_ttl`` is not a number greater than zero
+    """
+    # NaN is rejected explicitly: every comparison with NaN is False, so `negative_ttl <= 0` would accept it.
+    if (
+        isinstance(negative_ttl, bool)
+        or not isinstance(negative_ttl, (int, float))
+        or math.isnan(negative_ttl)
+        or negative_ttl <= 0
+    ):
+        raise ValueError("negative_ttl must be a number greater than zero")
+
+
 class BranchKeyNegativeCache(object):
     """The Negative Cache Entry, if any, of one Branch Key ID.
 
@@ -103,14 +119,7 @@ class BranchKeyNegativeCache(object):
         """Validates the Branch Key ID and Negative TTL."""
         if not isinstance(branch_key_id, str) or not branch_key_id:
             raise ValueError("branch_key_id must be a non-empty string")
-        # NaN is rejected explicitly: every comparison with NaN is False, so `negative_ttl <= 0` would accept it.
-        if (
-            isinstance(negative_ttl, bool)
-            or not isinstance(negative_ttl, (int, float))
-            or math.isnan(negative_ttl)
-            or negative_ttl <= 0
-        ):
-            raise ValueError("negative_ttl must be a number greater than zero")
+        validate_negative_ttl(negative_ttl)
         self._branch_key_id = branch_key_id
         self._negative_ttl = negative_ttl
         self._clock = clock
