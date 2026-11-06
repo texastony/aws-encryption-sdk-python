@@ -811,6 +811,15 @@ the Cache Guard enforces it (Requirement 3).
 UPDATE: The fix to the existing example is deferred to a later change;
 [design.md 10.2](./design.md#102-the-partition-id) records this.
 
+UPDATE: The example now uses the Tenant Keyring Factory.
+As one factory serves every Tenant's KMS key,
+its AWS KMS Key Store is configured for `Discovery`:
+it decrypts each Branch Key with the KMS key recorded in its item,
+and AWS KMS authorizes the Tenant's credentials for that key.
+Creating a Branch Key requires its KMS key,
+so the example onboards each Tenant through a Key Store configured with the Tenant's KMS key.
+One factory serves one KMS Region.
+
 **The Tenant identifier is the authorization boundary of cached materials**:  
 The shared cache's entries are identified by
 the Partition ID,

@@ -704,6 +704,10 @@ Thus,
 the example sets every parameter explicitly,
 documenting why in the source:
 
+UPDATE: These settings are now the Tenant Keyring Factory's defaults,
+`default_storm_tracking_cache()` in [tenant_keyring_factory.py](./tenant_keyring_factory.py),
+documented there; the example uses them.
+
 | Parameter                 | Example        | MPL default | Why                                                              |
 | ------------------------- | -------------- | ----------- | ---------------------------------------------------------------- |
 | `entry_capacity`          | 1000           | 1000        | Size for every Tenant's Branch Keys, not one Tenant's            |
@@ -762,6 +766,11 @@ so a Partition ID derived from them changes on every refresh,
 and every Tenant misses the shared cache once per refresh.
 The Partition ID SHOULD instead be derived from a stable Tenant identity;
 the example will be changed in a later change.
+
+UPDATE: The example now vends its keyrings from the
+[Tenant Keyring Factory](./negative_caching.md#72-a-tenant-keyring-factory),
+whose Partition ID is the Tenant's identifier, as is;
+the digest below is no longer used.
 
 The Partition ID is the SHA-384 digest of the Tenant's secret access key.
 
@@ -851,6 +860,9 @@ exactly as the existing `hierarchical_keyring_example.py` does with that identit
 | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------- |
 | [kms_transport.py](./kms_transport.py)                                                                  | Shared Transport                                              |
 | [tenant_kms_client.py](./tenant_kms_client.py)                                                          | Tenant KMS Client                                             |
+| [negative_cache.py](./negative_cache.py)                                                                | Negative Cache Entries ([negative_caching.md](./negative_caching.md)) |
+| [cache_guard.py](./cache_guard.py)                                                                      | Cache Guard                                                   |
+| [tenant_keyring_factory.py](./tenant_keyring_factory.py)                                                | Tenant Keyring Factory                                        |
 | [../multi_tenant_kms_keyring_example.py](../multi_tenant_kms_keyring_example.py)                       | AWS KMS Keyring and MRK Discovery Multi-Keyring, per Tenant   |
-| [../multi_tenant_hierarchical_keyring_example.py](../multi_tenant_hierarchical_keyring_example.py)     | AWS KMS Key Store and Hierarchical Keyring, per Tenant                |
+| [../multi_tenant_hierarchical_keyring_example.py](../multi_tenant_hierarchical_keyring_example.py)     | Hierarchical Keyrings, per Tenant, from a Tenant Keyring Factory      |
 | [../legacy/multi_tenant_kms_master_key_provider.py](../legacy/multi_tenant_kms_master_key_provider.py) | MKP subclasses and example, per Tenant                        |
