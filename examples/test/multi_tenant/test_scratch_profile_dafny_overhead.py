@@ -31,6 +31,7 @@ import collections
 import cProfile
 import os
 import pstats
+import sys
 import time
 
 from aws_encryption_sdk.identifiers import EncryptionKeyType, WrappingAlgorithm
@@ -60,6 +61,11 @@ BUCKETS = (
     ("network (urllib3, ssl, socket)", ("/urllib3/", "/ssl.py", "/socket.py", "/http/client.py", "/selectors.py")),
 )
 OTHER = "Python standard library, other"
+
+
+def report(line):
+    """Write a line of the report; run pytest with -s to see it."""
+    sys.stdout.write(line + "\n")
 
 
 def bucket_of(filename):
@@ -100,10 +106,10 @@ def measure(label, operation, count):
     totals = self_time_by_bucket(profile)
     profiled_total = sum(totals.values())
 
-    print("\n{}: {:.3f} ms per operation, unprofiled ({} operations)".format(label, unprofiled * 1000, count))
-    print("  profiled: {:.3f} ms per operation; own time by bucket:".format(profiled_total / count * 1000))
+    report("\n{}: {:.3f} ms per operation, unprofiled ({} operations)".format(label, unprofiled * 1000, count))
+    report("  profiled: {:.3f} ms per operation; own time by bucket:".format(profiled_total / count * 1000))
     for name, seconds in totals.most_common():
-        print("    {:5.1f}%  {:8.3f} ms/op  {}".format(100 * seconds / profiled_total, seconds / count * 1000, name))
+        report("    {:5.1f}%  {:8.3f} ms/op  {}".format(100 * seconds / profiled_total, seconds / count * 1000, name))
     return unprofiled, totals
 
 
@@ -119,7 +125,7 @@ def test_scratch_profile_vended_keyring(tenants, esdk):  # noqa: F811 pylint: di
     ciphertext, _ = esdk.encrypt(source=MESSAGE, keyring=keyring)
     assert esdk.decrypt(source=ciphertext, keyring=keyring)[0] == MESSAGE  # both cache entries are now warm
 
-    print("\n=== Tenant Hierarchical Keyring, {} byte messages ===".format(len(MESSAGE)))
+    report("\n=== Tenant Hierarchical Keyring, {} byte messages ===".format(len(MESSAGE)))
     _, warm_encrypt = measure("warm encrypt", lambda: esdk.encrypt(source=MESSAGE, keyring=keyring), WARM_OPERATIONS)
     _, warm_decrypt = measure("warm decrypt", lambda: esdk.decrypt(source=ciphertext, keyring=keyring), WARM_OPERATIONS)
 
@@ -139,17 +145,17 @@ def test_scratch_profile_vended_keyring(tenants, esdk):  # noqa: F811 pylint: di
     _, cold_decrypt = measure("cold decrypt", lambda: esdk.decrypt(source=ciphertext, keyring=cold_keyring()),
                               COLD_OPERATIONS)
 
-    print("\n=== For scale: native Python RawMasterKeyProvider (no MPL, no Dafny) ===")
+    report("\n=== For scale: native Python RawMasterKeyProvider (no MPL, no Dafny) ===")
     provider = _NativeStaticKeyProvider()
     provider.add_master_key("static-key")
     native_ciphertext, _ = esdk.encrypt(source=MESSAGE, key_provider=provider)
     measure("native encrypt", lambda: esdk.encrypt(source=MESSAGE, key_provider=provider), WARM_OPERATIONS)
     measure("native decrypt", lambda: esdk.decrypt(source=native_ciphertext, key_provider=provider), WARM_OPERATIONS)
 
-    print("\n=== Dafny generated code + runtime + externs + Smithy translation, share of profiled own time ===")
+    report("\n=== Dafny generated code + runtime + externs + Smithy translation, share of profiled own time ===")
     for label, totals in (("vend a keyring", vend), ("warm encrypt", warm_encrypt), ("warm decrypt", warm_decrypt),
                           ("cold encrypt", cold_encrypt), ("cold decrypt", cold_decrypt)):
-        print("  {:13s} {:5.1f}%".format(label, 100 * dafny_share(totals)))
+        report("  {:13s} {:5.1f}%".format(label, 100 * dafny_share(totals)))
 
 
 class _NativeStaticKeyProvider(RawMasterKeyProvider):
