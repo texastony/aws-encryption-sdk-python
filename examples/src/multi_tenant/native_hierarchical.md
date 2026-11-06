@@ -282,6 +282,19 @@ its `GetItem` requests leave `ConsistentRead` unset
 and it offers no option to change that.
 This is a common complaint of high throughput services.
 
+The specification proposes an option for it:
+[aws-encryption-sdk-specification#302](https://github.com/awslabs/aws-encryption-sdk-specification/pull/302),
+"Define Branch Key Store read consistency semantics",
+adds an optional `Require Consistent Reads` input to the Branch Key Store's Initialization;
+when it is `true`, `GetActiveBranchKey`, `GetBranchKeyVersion`, `GetBeaconKey`,
+and `VersionKey`'s read of the active version
+MUST set `ConsistentRead` to `true`;
+and all operations MUST use the same setting.
+The MPL's implementation is
+[aws-cryptographic-material-providers-library#1645](https://github.com/aws/aws-cryptographic-material-providers-library/pull/1645)
+(`requireConsistentReads` in `KeyStore.smithy`).
+Both are open, as of this writing, and neither is released.
+
 **What eventually consistent reads cost them**:  
 a read shortly after a write may not see it.
 In particular:
@@ -296,11 +309,17 @@ In particular:
   fails `GetBranchKeyVersion`
 
 **Decision**:  
-the native reader takes a `consistent_read` option, applied to every `GetItem` it makes:
+the native reader takes a `require_consistent_reads` option,
+the specification's `Require Consistent Reads`, with its semantics,
+applied to every `GetItem` it makes:
 
-- `False`, the default, as the MPL's AWS KMS Key Store reads
-- `True`, strongly consistent reads, for applications that create or version Branch Keys
+- `False`, the default: read operations MAY return stale results, as the MPL's AWS KMS Key Store reads today
+- `True`: every `GetItem` sets `ConsistentRead` to `true`, for applications that create or version Branch Keys
   and use them at once, on any host
+
+If #1645 is released,
+an application SHOULD give the MPL's AWS KMS Key Store, which creates and versions its Branch Keys,
+the same setting.
 
 It is configured per Tenant MKP Factory,
 so every Tenant's reader in a process reads the same way.
