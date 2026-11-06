@@ -30,10 +30,14 @@ see ``multi_tenant/negative_caching.md``.
 A Denied request raises an error of the AWS Cryptographic Material Providers Library (MPL),
 as the MPL is implemented in Dafny, and converts every error to and from Dafny:
 
-- The request that AWS KMS Denied raises an MPL ``KeyStore`` error.
-  The KMS error code is in its ``message`` only for codes the MPL does not model;
+- The request that AWS KMS Denied raises an MPL ``KeyStore`` error; the ``ClientError`` itself is not kept.
+  For codes the MPL does not model, its ``message`` is that ``ClientError``'s text, which names the code;
   for ``DisabledException``, ``KMSInvalidStateException``, ``NotFoundException``, and ``IncorrectKeyException``,
-  it is lost. Recording the Denial logs a warning naming the Branch Key ID and the code.
+  it is only AWS KMS's message, and the code is lost.
+  Recording the Denial logs a warning naming the Branch Key ID and the code.
+  To get the code at once, ask the factory for the Denial it recorded:
+  ``factory.negative_cache_for(tenant_id, branch_key_id).get().error`` is the ``ClientError`` AWS KMS returned
+  (``get()`` returns None if the failure was not a Denial).
 - Every request after it, until the Negative TTL expires, raises
   ``aws_cryptographic_material_providers.mpl.errors.OpaqueWithTextError``, without calling DynamoDB or KMS.
   Its ``obj`` is the ``botocore.exceptions.ClientError`` AWS KMS returned, the same object, so
