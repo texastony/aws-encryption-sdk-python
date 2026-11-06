@@ -31,7 +31,8 @@ A Denied request raises an error of the AWS Cryptographic Material Providers Lib
 as the MPL is implemented in Dafny, and converts every error to and from Dafny:
 
 - The request that AWS KMS Denied raises an MPL ``KeyStore`` error; the ``ClientError`` itself is not kept.
-  For codes the MPL does not model, its ``message`` is that ``ClientError``'s text, which names the code;
+  Its ``message`` may itself be a nested MPL error; ``str(error)`` is the text.
+  For codes the MPL does not model, that is the ``ClientError``'s text, which names the code;
   for ``DisabledException``, ``KMSInvalidStateException``, ``NotFoundException``, and ``IncorrectKeyException``,
   it is only AWS KMS's message, and the code is lost.
   Recording the Denial logs a warning naming the Branch Key ID and the code.
