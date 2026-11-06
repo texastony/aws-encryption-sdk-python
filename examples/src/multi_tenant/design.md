@@ -755,6 +755,14 @@ and additionally by their Partition IDs.
 
 ### 10.2 The Partition ID
 
+UPDATE: This decision is revisited in
+[negative_caching.md 8](./negative_caching.md#8-the-partition-id-revisited).
+No part of refreshed credentials is constant,
+so a Partition ID derived from them changes on every refresh,
+and every Tenant misses the shared cache once per refresh.
+The Partition ID SHOULD instead be derived from a stable Tenant identity;
+the example will be changed in a later change.
+
 The Partition ID is the SHA-384 digest of the Tenant's secret access key.
 
 **It is distinct per Tenant**:  

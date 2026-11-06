@@ -21,25 +21,23 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
+      # To keep CI cheap, only Python 3.12 on Ubuntu is tested.
+      # Python 3.8, 3.9, and 3.10 are end of life;
+      # the ubuntu-latest runner no longer provides 3.8 or 3.9.
       matrix:
         os:
           - ubuntu-latest
-          - windows-latest
-          - macos-latest
         python:
-          - 3.8
-          - 3.9
-          - "3.10"
-          - "3.11"
           - "3.12"
-          - 3.x
         architecture:
           - x64
-          - x86
         category:
           - local
           - accept
           - mpllocal
+          # Offline examples tests (pytest.mark.local); these need no credentials.
+          - exampleslocal
+          - mplexampleslocal
 # These require credentials.
 # Enable them once we sort how to provide them.
 #          - integ
@@ -50,48 +48,15 @@ jobs:
           - ""
           - -mpl
         exclude:
-          # Python <3.11 incompatible with macOS ARM64 runners
-          # https://github.com/actions/setup-python/issues/948
-          - python: 3.7
-            os: macos-latest
-          - python: 3.8
-            os: macos-latest
-          - python: 3.9
-            os: macos-latest
-          - python: 3.10
-            os: macos-latest
-
-          # x86 builds are only meaningful for Windows
-          - os: ubuntu-latest
-            architecture: x86
-          - os: macos-latest
-            architecture: x86
-
-          # `cryptography` no longer publishes 32-bit Windows wheels for
-          # any CPython version, so pip falls back to building from sdist.
-          # That build is Rust/maturin-based and fails on the hosted
-          # windows-latest runner because only the x86_64 Rust target is
-          # installed while the interpreter reports platform `win32`
-          # (i686), so maturin refuses to use it. Drop x86 on Windows
-          # entirely; the only path back would be host-side toolchain
-          # provisioning (i686 Rust target + 32-bit OpenSSL) per cell,
-          # which isn't worth it for a configuration upstream no longer
-          # supports.
-          - os: windows-latest
-            architecture: x86
-
-          # MPL is not supported on <3.11
-          - python: 3.7
-            optional_mpl_dependency: -mpl
-          - python: 3.8
-            optional_mpl_dependency: -mpl
-          - python: 3.9
-            optional_mpl_dependency: -mpl
-          - python: 3.10
-            optional_mpl_dependency: -mpl
           # mpllocal requires the MPL to be installed
           - category: mpllocal
             optional_mpl_dependency: ""
+          # mplexampleslocal requires the MPL to be installed
+          - category: mplexampleslocal
+            optional_mpl_dependency: ""
+          # exampleslocal is the legacy (Master Key Provider) examples, which do not use the MPL
+          - category: exampleslocal
+            optional_mpl_dependency: -mpl
     steps:
       # Support long Dafny filenames (used in MPL and DBESDK repos)
       - name: Support longpaths
@@ -111,23 +76,56 @@ jobs:
         env:
           TOXENV: ${{ matrix.category }}${{ matrix.optional_mpl_dependency }}
         run: tox -- -vv
-  upstream-py311:
+  ddblocal:
+    # Examples tests against DynamoDB Local (pytest -m ddblocal), with the fake KMS;
+    # no AWS credentials are needed, so this also runs on forks.
+    runs-on: ubuntu-latest
+    services:
+      dynamodb:
+        # Pinned, so a new DynamoDB Local release cannot change CI unnoticed.
+        # The image's default command is `-jar DynamoDBLocal.jar -inMemory`.
+        image: amazon/dynamodb-local:3.3.2
+        ports:
+          - 8000:8000
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+      - run: |
+          python -m pip install --upgrade pip
+          pip install --upgrade -r dev_requirements/ci-requirements.txt
+      - name: Wait for DynamoDB Local
+        run: |
+          for attempt in $(seq 1 30); do
+            curl -s -o /dev/null http://localhost:8000 && exit 0
+            sleep 1
+          done
+          echo "DynamoDB Local did not start"
+          exit 1
+      - name: run test
+        env:
+          TOXENV: mplddblocal-mpl
+          DDB_LOCAL_ENDPOINT: http://localhost:8000
+        run: tox -- -vv
+  nocmk:
+    # Python 3.12 only, as above. test-upstream-requirements-py311 is not run:
+    # it pins Python 3.11 and frozen 3.11 requirements, with no 3.12 equivalent.
     runs-on: ubuntu-latest
     strategy:
       fail-fast: true
       matrix:
         category:
           - nocmk
-          - test-upstream-requirements-py311
     steps:
         - uses: actions/checkout@v4
         - uses: actions/setup-python@v4
           with:
-            python-version: "3.11"
+            python-version: "3.12"
         - run: |
             python -m pip install --upgrade pip
             pip install --upgrade -r dev_requirements/ci-requirements.txt
         - name: run test
           env:
-            TOXENV: ${{ matrix.category }}${{ matrix.optional_mpl_dependency }}
+            TOXENV: ${{ matrix.category }}
           run: tox -- -vv

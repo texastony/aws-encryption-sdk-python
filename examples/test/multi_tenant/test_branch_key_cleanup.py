@@ -8,7 +8,8 @@ from botocore.stub import Stubber
 
 from ..branch_key_cleanup import cleanup_branch_keys, delete_branch_key
 
-pytestmark = [pytest.mark.examples]
+# Offline: no network access, so these also run as local tests (tox: exampleslocal, mplexampleslocal).
+pytestmark = [pytest.mark.examples, pytest.mark.local]
 
 TABLE = "KeyStoreDdbTable"
 BKID = "bbb9baf1-03e6-4716-a586-6bf29995314b"
