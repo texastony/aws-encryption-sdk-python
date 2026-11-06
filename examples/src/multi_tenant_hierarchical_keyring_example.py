@@ -27,6 +27,21 @@ When AWS KMS denies a tenant's Branch Key, the factory's keyrings fail that tena
 without calling DynamoDB or KMS, for the Negative TTL (5 minutes by default);
 see ``multi_tenant/negative_caching.md``.
 
+A Denied request raises an error of the AWS Cryptographic Material Providers Library (MPL),
+as the MPL is implemented in Dafny, and converts every error to and from Dafny:
+
+- The request that AWS KMS Denied raises an MPL ``KeyStore`` error.
+  The KMS error code is in its ``message`` only for codes the MPL does not model;
+  for ``DisabledException``, ``KMSInvalidStateException``, ``NotFoundException``, and ``IncorrectKeyException``,
+  it is lost. Recording the Denial logs a warning naming the Branch Key ID and the code.
+- Every request after it, until the Negative TTL expires, raises
+  ``aws_cryptographic_material_providers.mpl.errors.OpaqueWithTextError``, without calling DynamoDB or KMS.
+  Its ``obj`` is the ``botocore.exceptions.ClientError`` AWS KMS returned, the same object, so
+  ``error.obj.response["Error"]["Code"]`` is the code; its ``obj_message`` is that error's text.
+  Its own ``str()`` is empty; log ``obj_message``, or ``obj``.
+
+``denied_kms_error``, below, unwraps it.
+
 The AWS KMS Key Store calls AWS KMS to create a Branch Key
 (``GenerateDataKeyWithoutPlaintext`` and ``ReEncrypt``)
 and to decrypt a Branch Key on a cache miss (``Decrypt``);
@@ -51,7 +66,7 @@ This example requires access to the DDB Table where you are storing the Branch K
 table must be configured with the following primary key configuration: - Partition key is named
 "branch-key-id" with type (S) - Sort key is named "type" with type (S).
 
-This example creates a new Branch Key per tenant every time it runs, and returns their Branch Key IDs.
+This example creates a Branch Key per tenant, with the Branch Key ID the caller assigns that tenant.
 Branch Keys SHOULD NOT be deleted in production: deleting a Branch Key cryptographically shreds
 every message it protected. This example's test deletes them only to keep the example table from growing.
 
@@ -71,8 +86,10 @@ from aws_cryptographic_material_providers.keystore.models import (
     KMSConfigurationDiscovery,
     KMSConfigurationKmsKeyArn,
 )
+from aws_cryptographic_material_providers.mpl.errors import OpaqueWithTextError
 from aws_cryptographic_material_providers.mpl.references import IKeyring
 from botocore.credentials import Credentials
+from botocore.exceptions import ClientError
 from typing import Dict, Optional  # noqa pylint: disable=wrong-import-order
 
 import aws_encryption_sdk
@@ -88,25 +105,38 @@ def _region(kms_key_arn: str) -> str:
     return kms_key_arn.split(":")[3]
 
 
+def denied_kms_error(error: Exception) -> Optional[ClientError]:
+    """Returns the AWS KMS error a negatively cached request failed with, or None.
+
+    While a tenant's Branch Key is Denied, its keyring raises an ``OpaqueWithTextError``,
+    whose ``obj`` is the ``ClientError`` AWS KMS returned for the Denied request.
+
+    :param error: An error raised by encrypt or decrypt with a keyring from the Tenant Keyring Factory
+    :returns: The ``ClientError``; its ``response["Error"]["Code"]`` is the KMS error code
+    """
+    if isinstance(error, OpaqueWithTextError) and isinstance(error.obj, ClientError):
+        return error.obj
+    return None
+
+
 def encrypt_and_decrypt_with_keyring(
     key_store_table_name: str,
     logical_key_store_name: str,
     tenant_kms_key_ids: Dict[str, str],
     tenant_credentials: Dict[str, Credentials],
+    tenant_branch_key_ids: Dict[str, str],
     ddb_region: str = "us-west-2",
-    branch_key_ids: Optional[Dict[str, str]] = None,
-) -> Dict[str, str]:
-    """Creates a Branch Key per tenant, then encrypts and decrypts a message for each tenant.
+) -> None:
+    """Creates each tenant's Branch Key, then encrypts and decrypts a message for each tenant.
 
     :param key_store_table_name: Name of the DynamoDB table backing the AWS KMS Key Store
     :param logical_key_store_name: Logical name of the AWS KMS Key Store
     :param tenant_kms_key_ids: Map of tenant identifier to the ARN of that tenant's KMS key;
         every KMS key MUST be in the same AWS Region
     :param tenant_credentials: Map of tenant identifier to that tenant's credentials
+    :param tenant_branch_key_ids: Map of tenant identifier to the Branch Key ID the application assigned that tenant;
+        this example creates each, and fails if one already exists
     :param ddb_region: Region of the DynamoDB table
-    :param branch_key_ids: If given, filled in with each tenant's Branch Key ID as soon as it is created,
-        so the caller can clean them up even if this function raises (optional)
-    :returns: Map of tenant identifier to the Branch Key ID created for that tenant
     :raises ValueError: if the tenants' KMS keys are in more than one AWS Region
     """
     kms_regions = {_region(kms_key_id) for kms_key_id in tenant_kms_key_ids.values()}
@@ -124,10 +154,6 @@ def encrypt_and_decrypt_with_keyring(
     ddb_client = boto3.client("dynamodb", region_name=ddb_region)
     transport = KmsTransport()
 
-    # The Branch Key ID created for each tenant; filled in as each is created, so the caller can track them.
-    if branch_key_ids is None:
-        branch_key_ids = {}
-
     try:
         # 3. Create one Tenant Keyring Factory, shared by every tenant.
         #    It creates the storm tracking cache every tenant's keyring shares,
@@ -144,11 +170,11 @@ def encrypt_and_decrypt_with_keyring(
         )
 
         for tenant, kms_key_id in tenant_kms_key_ids.items():
-            # 4. Onboard the tenant: create its Branch Key.
+            # 4. Onboard the tenant: create its Branch Key, with the Branch Key ID the application assigned it.
             #    This calls kms:GenerateDataKeyWithoutPlaintext and kms:ReEncrypt, with this tenant's credentials,
             #    through an AWS KMS Key Store configured with the tenant's KMS key, as creating a Branch Key needs it.
             #    Applications usually create a tenant's Branch Key once, when the tenant is onboarded,
-            #    and persist the Branch Key ID.
+            #    with a Branch Key ID they choose, rather than one the AWS KMS Key Store generates.
             #    Branch Keys SHOULD NOT be deleted in production: deleting a Branch Key
             #    cryptographically shreds every message it protected. This example creates a new
             #    Branch Key per tenant on every run, so its test deletes them, to keep the table from growing.
@@ -165,8 +191,15 @@ def encrypt_and_decrypt_with_keyring(
                     kms_configuration=KMSConfigurationKmsKeyArn(value=kms_key_id),
                 )
             )
-            branch_key_id: str = onboarding_key_store.create_key(input=CreateKeyInput()).branch_key_identifier
-            branch_key_ids[tenant] = branch_key_id
+            branch_key_id: str = onboarding_key_store.create_key(
+                input=CreateKeyInput(
+                    branch_key_identifier=tenant_branch_key_ids[tenant],
+                    # Required with a chosen Branch Key ID. It is added to every AWS KMS request's encryption context,
+                    # prefixed with "aws-crypto-ec:", so the tenant's KMS key policy can require it.
+                    encryption_context={"tenant": tenant},
+                )
+            ).branch_key_identifier
+            assert branch_key_id == tenant_branch_key_ids[tenant]
 
             # 5. Vend this tenant's Hierarchical Keyring.
             #    Its Partition ID is the tenant's identifier, and its Branch Key ID is static.
@@ -183,7 +216,7 @@ def encrypt_and_decrypt_with_keyring(
             # 6. Encrypt and decrypt with the tenant's keyring.
             #    On a Branch Key cache miss, the AWS KMS Key Store calls kms:Decrypt with the tenant's credentials.
             #    If AWS KMS denies it, this tenant's requests for this Branch Key fail for the Negative TTL,
-            #    without calling DynamoDB or KMS.
+            #    without calling DynamoDB or KMS, raising an OpaqueWithTextError; see denied_kms_error.
             encryption_context: Dict[str, str] = {
                 "tenant": tenant,
                 "encryption": "context",
@@ -212,5 +245,3 @@ def encrypt_and_decrypt_with_keyring(
         #    so every tenant pays a new TLS handshake on its next request.
         transport.close()
         ddb_client.close()
-
-    return branch_key_ids

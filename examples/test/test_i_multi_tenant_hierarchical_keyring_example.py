@@ -1,6 +1,8 @@
 # Copyright Amazon.com Inc. or its affiliates. All Rights Reserved.
 # SPDX-License-Identifier: Apache-2.0
 """Test suite for the multi-tenant hierarchical keyring example."""
+import uuid
+
 import boto3
 import botocore.session
 import pytest
@@ -17,18 +19,20 @@ def test_encrypt_and_decrypt_with_keyring():
     kms_key_id = "arn:aws:kms:us-west-2:370957321024:key/9d989aa2-2f9c-438c-a745-cc57d3ad0126"
     # The test environment has one identity; real tenants would each have their own credentials.
     credentials = botocore.session.Session().get_credentials()
-    # Filled in by the example as each Branch Key is created, so they are cleaned up even if it raises.
-    branch_key_ids = {}
+    # Assigned by the application, as most applications do; unique per run, so runs never collide.
+    # UUID version 4: the standard library's uuid7 is new in Python 3.14, and this package supports 3.8.
+    branch_key_ids = {
+        "TenantA": "esdk-python-example-tenant-A-{}".format(uuid.uuid4()),
+        "TenantB": "esdk-python-example-tenant-B-{}".format(uuid.uuid4()),
+    }
     try:
-        returned = encrypt_and_decrypt_with_keyring(
+        encrypt_and_decrypt_with_keyring(
             key_store_table_name=key_store_table_name,
             logical_key_store_name=key_store_table_name,
             tenant_kms_key_ids={"TenantA": kms_key_id, "TenantB": kms_key_id},
             tenant_credentials={"TenantA": credentials, "TenantB": credentials},
-            branch_key_ids=branch_key_ids,
+            tenant_branch_key_ids=branch_key_ids,
         )
-        assert returned is branch_key_ids
-        assert set(branch_key_ids) == {"TenantA", "TenantB"}
     finally:
         # Clean up the Branch Keys the example created, best effort, to keep the example table from growing.
         # Branch Keys SHOULD NOT be deleted in production: deleting a Branch Key
