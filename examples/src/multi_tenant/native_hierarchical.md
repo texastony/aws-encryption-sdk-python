@@ -127,6 +127,12 @@ This is the trade this document weighs.
 9. The native Branch Key reader MUST offer strongly consistent reads, as an option
    ([4.1](#41-read-consistency)).
 
+10. The native path MUST be annotated with Duvet,
+    citing the specification as the MPL's Dafny does, wherever it can;
+    and every citation of the MPL's Dafny on the paths it replaces
+    MUST be cited, or excepted with a reason
+    ([9](#9-specification-compliance-duvet)).
+
 # Out of Scope
 
 - Creating, versioning, and mutating Branch Keys:
@@ -527,6 +533,115 @@ the native path's MUST be tested:
   - the suite run on free threaded CPython (`python3.13t` or later, `PYTHON_GIL=0`), in CI
 - **Performance**: the scratch profile, kept as a benchmark,
   comparing the MPL path and the native path, cached and not, single and multi threaded.
+- **Specification compliance**: Duvet, matching the MPL's Dafny ([9](#9-specification-compliance-duvet)).
+
+## 9 Specification compliance (Duvet)
+
+The MPL's Dafny cites the specification with [Duvet](https://github.com/awslabs/duvet):
+a `//=` line names the section, and `//#` lines quote its text,
+above the code that implements it;
+`duvet report` checks every quote against the specification,
+and reports each requirement as cited, tested, excepted, or missing.
+Formal verification proves the Dafny meets its own specification;
+Duvet is how a reviewer sees that specification is the AWS Encryption SDK Specification.
+The native path has no proofs,
+so its Duvet annotations, and its tests' (`type=test`), carry more of the weight.
+
+### 9.1 The same citations, where they can be
+
+The native path MUST carry the citations the MPL's Dafny carries,
+on the code that does the same thing:
+the same section, and the same quoted text.
+On the paths it replaces, at the MPL's `v1.11.3`, those are:
+
+| Specification section                                                          | Citations | MPL Dafny source                |
+| ------------------------------------------------------------------------------ | --------- | ------------------------------- |
+| `aws-kms/aws-kms-hierarchical-keyring.md#branch-key-wrapping`                  | 11        | `AwsKmsHierarchicalKeyring.dfy` |
+| `aws-kms/aws-kms-hierarchical-keyring.md#onencrypt`                            | 7         | `AwsKmsHierarchicalKeyring.dfy` |
+| `aws-kms/aws-kms-hierarchical-keyring.md#ondecrypt`                            | 4         | `AwsKmsHierarchicalKeyring.dfy` |
+| `aws-kms/aws-kms-hierarchical-keyring.md#initialization`                       | 3         | `AwsKmsHierarchicalKeyring.dfy` |
+| `aws-kms/aws-kms-hierarchical-keyring.md#branch-key-wrapping-and-unwrapping-aad` | 2       | `AwsKmsHierarchicalKeyring.dfy` |
+| `aws-kms/aws-kms-hierarchical-keyring.md#interface`, `#encryption-materials`, `#decryption-materials` | 3 | `AwsKmsHierarchicalKeyring.dfy` |
+| `branch-key-store.md#aws-kms-branch-key-decryption`                            | 14        | `GetKeys.dfy`                   |
+| `branch-key-store.md#getactivebranchkey`                                       | 7         | `GetKeys.dfy`                   |
+| `branch-key-store.md#getbranchkeyversion`                                      | 7         | `GetKeys.dfy`                   |
+| `branch-key-store.md#encryption-context`                                       | 10        | `Structure.dfy`                 |
+| `branch-key-store.md#branch-key-materials-from-authenticated-encryption-context` | 8       | `Structure.dfy`                 |
+| `branch-key-store.md#custom-encryption-context`                                | 6         | `Structure.dfy`                 |
+| `branch-key-store.md#active-encryption-context`                                | 3         | `Structure.dfy`                 |
+| `branch-key-store.md#record-format`                                            | 2         | `Structure.dfy`                 |
+
+In Python, as the MPL's own report reads `#` comments (`(# //=,# //#)`):
+
+```python
+# //= aws-encryption-sdk-specification/framework/aws-kms/aws-kms-hierarchical-keyring.md#branch-key-wrapping
+# //# 1. Generate a 16 byte random `salt` using a secure source of randomness
+salt = os.urandom(16)
+```
+
+**A parity check**:  
+a script MUST extract every (section, quote) the MPL's Dafny cites in those sources,
+at the MPL version the native path matches,
+and fail if the native sources neither cite it nor except it.
+It runs in CI, beside `duvet report`;
+so a citation the MPL adds, or the native path drops, is caught.
+
+### 9.2 Where they cannot be
+
+The native path is a Master Key Provider, not a keyring,
+and has its own cache;
+so some citations cannot apply as written.
+Each MUST be a `type=exception` (or `type=implication`), with its reason, in a compliance exceptions file,
+as this repository's `compliance_exceptions/` already does. For example:
+
+- `#initialization`'s "MUST initialize a cryptographic-materials-cache ... with the configured cache limit TTL
+  and the max cache size": the Tenant MKP Factory owns one Branch Key Cache, shared by every MKP it vends;
+  and its Branch Key Supplier: the factory vends an MKP per Branch Key ID instead
+- `#appendix-a-cache-entry-identifier-formulas`:
+  the Branch Key Cache is not shared with MPL keyrings, so it does not use their identifiers
+- the keyring interface's materials structures, where the MKP interface's `DataKey` and
+  `EncryptedDataKey` carry the same fields under the ESDK's names (`type=implication`)
+
+The native path's own behavior, that the specification does not describe
+(the Branch Key Cache's thread safety, single flight Fetches, negative caching),
+is not cited; this document, and its tests, cover it.
+
+`Require Consistent Reads` ([4.1](#41-read-consistency)) is not in the specification yet;
+its citations are `type=todo` until
+[aws-encryption-sdk-specification#302](https://github.com/awslabs/aws-encryption-sdk-specification/pull/302)
+is merged.
+
+### 9.3 Which specification
+
+Quotes MUST match the specification revision they cite, exactly.
+This repository's `aws-encryption-sdk-specification` submodule is pinned at `c35fbd9` (2021-06-18),
+which predates the AWS KMS Hierarchical Keyring;
+the MPL, at `v1.11.3` and on `main`, pins `8f4afff` (2024-06-05).
+The native path MUST cite the revision the MPL version it matches pins,
+so that its quotes, and the MPL's, are the same text.
+
+That revision lags the MPL itself:
+at `8f4afff`, the AWS KMS Hierarchical Keyring's Initialization has no `Partition ID` or `Cache Type`,
+and there is no Shared Cache Considerations section,
+though the MPL implements both, and the specification's current `master` describes them.
+The native path's Tenant isolation ([negative_caching.md 8](./negative_caching.md#8-the-partition-id-revisited))
+can be cited only against a newer revision.
+Either this repository's submodule is updated,
+which changes the text its existing citations quote,
+or the native path's report uses a second checkout, pinned to the MPL's revision;
+see [Open Questions](#open-questions).
+
+### 9.4 The tool
+
+This repository's existing citations use the older Duvet form
+(`# //= compliance/framework/aws-kms/aws-kms-key-arn.txt#2.8`, against extracted text, by section number).
+The MPL uses the current Duvet (`cargo install duvet`),
+which extracts the specification's Markdown (`duvet extract -f MARKDOWN`)
+and cites it by heading anchor (`.md#branch-key-wrapping`).
+The native path MUST use the current form, the MPL's,
+so its citations can be compared with the MPL's (9.1);
+its `duvet report` runs over the native sources and tests only,
+and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
 
 # Open Questions
 
@@ -553,8 +668,15 @@ the native path's MUST be tested:
 6. **One Branch Key ID per MKP**: as the Tenant Keyring Factory vends today;
    or a Branch Key ID supplier, if a Tenant has several.
 
+7. **The specification revision for Duvet** ([9.3](#93-which-specification)):
+   update this repository's `aws-encryption-sdk-specification` submodule to the MPL's pin,
+   and re-extract its existing citations' text;
+   or check out the MPL's pin a second time, for the native path's report only.
+
 # Consequences
 
+- Every citation the MPL adds to the paths the native path replaces
+  is a requirement of the native path; the parity check ([9.1](#91-the-same-citations-where-they-can-be)) enforces it.
 - The hot path loses formal verification;
   interoperability and thread safety tests replace it, and MUST be kept.
 - The native path's correctness depends on matching the MPL's wire format exactly,
