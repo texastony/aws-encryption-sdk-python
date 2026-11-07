@@ -1,7 +1,7 @@
 [//]: # "Copyright Amazon.com Inc. or its affiliates. All Rights Reserved."
 [//]: # "SPDX-License-Identifier: Apache-2.0"
 
-# A Native Python Hierarchical Master Key Provider for Multi-Tenant, High Throughput Systems
+# A Native Python Multi-Tenant Hierarchical Master Key Provider, for High Throughput Systems
 
 DRAFT: a sketch, for discussion.
 
@@ -32,7 +32,7 @@ Encrypting or decrypting with the ESDK
 through a Master Key Provider (MKP) and the ESDK's own `DefaultCryptoMaterialsManager`;
 Python throughout, with no MPL and no Dafny.
 
-## Native Hierarchical MKP
+## Multi-Tenant Hierarchical MKP
 
 The Master Key Provider this document designs:
 for one Tenant and one Branch Key ID,
@@ -42,7 +42,7 @@ so that each can decrypt what the other encrypted.
 ## Branch Key Cache
 
 The native cache of Branch Key materials this document designs,
-shared by every Native Hierarchical MKP in a process.
+shared by every Multi-Tenant Hierarchical MKP in a process.
 
 ## Fetch
 
@@ -88,10 +88,10 @@ This is the trade this document weighs.
 
 # Requirements
 
-1. The Native Hierarchical MKP MUST decrypt every message
+1. The Multi-Tenant Hierarchical MKP MUST decrypt every message
    the AWS KMS Hierarchical Keyring encrypts for the same Branch Key,
    and the AWS KMS Hierarchical Keyring MUST decrypt every message
-   the Native Hierarchical MKP encrypts
+   the Multi-Tenant Hierarchical MKP encrypts
    ([3](#3-wire-compatibility)).
 
 2. The native path MUST NOT import the MPL,
@@ -142,7 +142,11 @@ This is the trade this document weighs.
 - Hierarchy version 2 Branch Keys, which were never shipped.
 - The MPL's Required Encryption Context CMM, and other MPL only features
   ([2](#2-keyring-or-master-key-provider)).
-- Multi-Region Key replicas (`MRDiscovery`) in the first version; see [Open Questions](#open-questions).
+- More than one AWS Region, in the first version: every Tenant's KMS key, and the AWS KMS Key Store's table,
+  are in one Region, per Tenant MKP Factory. Multi-Region Key replicas (`MRDiscovery`) are a later addition,
+  which SHOULD be straightforward: the replica Region rewriting of `branch-key-store.md`'s AWS KMS Branch Key Decryption.
+- A Branch Key ID supplier, in the first version: each Multi-Tenant Hierarchical MKP is for one Tenant
+  and one Branch Key ID. How a supplier would combine with the per Tenant factory is not yet designed.
 
 # Design Questions
 
@@ -154,7 +158,7 @@ Each piece, and what replaces it:
 | MPL path, Dafny                              | Native replacement                         | On the hot path?   |
 | -------------------------------------------- | ------------------------------------------ | ------------------ |
 | Cryptographic Materials Manager              | the ESDK's `DefaultCryptoMaterialsManager` | every operation    |
-| AWS KMS Hierarchical Keyring                 | the Native Hierarchical MKP and its Master Key | every operation |
+| AWS KMS Hierarchical Keyring                 | the Multi-Tenant Hierarchical MKP and its Master Key | every operation |
 | Storm tracking Cryptographic Materials Cache | the Branch Key Cache                       | every operation    |
 | Cache Guard, Negative Cache Entries          | part of the Branch Key Cache               | every operation    |
 | AWS KMS Key Store, `GetActiveBranchKey`      | a native Branch Key reader                 | every cache miss   |
@@ -169,7 +173,7 @@ and the DynamoDB client.
 
 The Tenant Keyring Factory becomes a Tenant MKP Factory:
 the same shared state ([negative_caching.md 7.2](./negative_caching.md#72-a-tenant-keyring-factory)),
-vending Native Hierarchical MKPs instead of keyrings.
+vending Multi-Tenant Hierarchical MKPs instead of keyrings.
 
 ## 2 Keyring, or Master Key Provider?
 
@@ -212,7 +216,7 @@ A Master Key Provider (2.2).
 
 ## 3 Wire compatibility
 
-The Native Hierarchical MKP MUST produce, and accept,
+The Multi-Tenant Hierarchical MKP MUST produce, and accept,
 exactly what the AWS KMS Hierarchical Keyring does
 (`aws-kms-hierarchical-keyring.md`, Structure and Operation):
 
@@ -369,7 +373,7 @@ any read and write of shared mutable state may interleave.
 | Tenant KMS Client          | one Tenant's MKPs                  | no                           | immutable references; botocore's `RefreshableCredentials` lock their own refresh |
 | Branch Key Cache           | every Tenant                       | yes                          | [5.2](#52-the-branch-key-cache) |
 | Negative cache             | one Tenant and Branch Key ID       | yes                          | one lock, as today ([negative_caching.md 4.3](./negative_caching.md#43-a-cache-guard)) |
-| Native Hierarchical MKP    | MAY be shared, or one per request  | MUST NOT be                  | [5.4](#54-the-master-key-provider) |
+| Multi-Tenant Hierarchical MKP    | MAY be shared, or one per request  | MUST NOT be                  | [5.4](#54-the-master-key-provider) |
 | Tenant MKP Factory         | every Tenant                       | its map of negative caches   | one short lock, as today |
 
 ### 5.2 The Branch Key Cache
@@ -394,13 +398,17 @@ on free threaded CPython that is the bottleneck this design exists to remove.
 by `time.monotonic()`, never wall clock;
 checked by the reader, with the entry in hand, outside the lock.
 
-**Capacity**:  
-a bound on entries, across every Tenant, as the storm tracking cache's `entry_capacity`.
-Exact LRU needs a write (moving the entry) on every hit,
-under the stripe's lock;
-an approximate policy (per stripe LRU, or CLOCK: a "used" bit set without the lock, cleared on sweep)
-keeps a hit to a read.
-The author's preference is per stripe LRU, measured first; see [Open Questions](#open-questions).
+**Capacity and eviction: an LRU with a TTL**:  
+a bound on entries, across every Tenant, as the storm tracking cache's `entry_capacity`;
+when it is reached, the least recently used entry is evicted.
+Every entry also expires at its TTL, the cache limit TTL, whether or not it is used.
+Each stripe is an LRU (an `OrderedDict`) of its share of the capacity;
+a hit moves its entry to the end, under the stripe's lock,
+which is a short, constant time write.
+Thus eviction is least recently used within a stripe, an approximation of a global LRU,
+in exchange for never taking a global lock.
+An approximate policy that makes a hit a read only (CLOCK) was considered, and rejected;
+the stress test ([8](#8-verification)) measures the stripe locks' contention.
 
 ### 5.3 Single flight Fetches
 
@@ -456,7 +464,7 @@ without a lock (`src/aws_encryption_sdk/key_providers/base.py`).
 Two threads adding the same key could both append it,
 and an encrypt would then wrap the data key twice.
 
-So a Native Hierarchical MKP MUST be immutable once vended:
+So a Multi-Tenant Hierarchical MKP MUST be immutable once vended:
 the factory constructs it with its one Master Key, for its one Branch Key ID,
 before any other thread can see it;
 and it overrides `_new_master_key` and `master_key_for_decrypt`
@@ -472,7 +480,29 @@ so applications MAY vend one per request, as with keyrings today
 ([negative_caching.md 8](./negative_caching.md#8-the-partition-id-revisited));
 or share one per Tenant and Branch Key ID across threads.
 
-### 5.5 Randomness, and keys in memory
+### 5.5 The dependencies, on free threaded CPython
+
+The native path depends on the ESDK's runtime dependencies,
+and on botocore's, for the Tenant KMS Client and the DynamoDB client;
+not on the MPL.
+As of this writing (their latest releases, on PyPI):
+
+| Package          | Free threaded support                                                        |
+| ---------------- | ---------------------------------------------------------------------------- |
+| `cryptography`   | `cp314t` (abi3t) wheels; classifier "Free Threading :: 3 - Stable"            |
+| `boto3`, `botocore` | pure Python; classifier "Free Threading :: 2 - Beta"                      |
+| `urllib3`, `s3transfer`, `python-dateutil` | pure Python; classifier "Free Threading :: 2 - Beta" |
+| `wrapt`          | `cp314t` and `cp315t` wheels, and a pure Python fallback; no classifier      |
+| `attrs`, `jmespath`, `six` | pure Python; no classifier                                         |
+
+So free threaded CPython is practical from 3.14t:
+`cryptography` publishes no `cp313t` wheel, so 3.13t builds it from source.
+The classifiers are each project's own claim;
+the ESDK makes none,
+and its `MasterKeyProvider` base class is not safe on free threaded CPython ([5.4](#54-the-master-key-provider)).
+So the free threaded CI job ([8](#8-verification)) is the evidence, not the classifiers.
+
+### 5.6 Randomness, and keys in memory
 
 Salts, IVs, and data keys come from `os.urandom`, which is thread safe.
 `cryptography`'s `AESGCM` and `KBKDFHMAC` objects are created per call, not shared.
@@ -519,7 +549,7 @@ The MPL path's correctness is proven;
 the native path's MUST be tested:
 
 - **Interoperability**, both directions:
-  the Native Hierarchical MKP decrypts the AWS KMS Hierarchical Keyring's messages, and the reverse;
+  the Multi-Tenant Hierarchical MKP decrypts the AWS KMS Hierarchical Keyring's messages, and the reverse;
   every committing algorithm suite, signing and not;
   empty, small, and large encryption contexts; one and many encrypted data keys.
 - **The KDF**, against the MPL's `KdfCtr`, for random inputs.
@@ -631,6 +661,11 @@ which changes the text its existing citations quote,
 or the native path's report uses a second checkout, pinned to the MPL's revision;
 see [Open Questions](#open-questions).
 
+UPDATE: A second checkout of the specification, pinned to the MPL's revision,
+used only by the native path's `duvet extract` and `duvet report`;
+this repository's existing submodule, and its citations, are unchanged.
+When the native path is matched to a newer MPL release, its pin moves to that release's.
+
 ### 9.4 The tool
 
 This repository's existing citations use the older Duvet form
@@ -647,8 +682,13 @@ and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
 
 1. **The cache's eviction policy**: per stripe LRU, CLOCK, or TTL only; measured under contention.
 
+   UPDATE: An LRU with a TTL ([5.2](#52-the-branch-key-cache)).
+
 2. **`MRDiscovery`**: the replica region rewriting of `branch-key-store.md`;
    needed by any Tenant using multi-Region keys.
+
+   UPDATE: The first version is single Region ([Out of Scope](#out-of-scope));
+   multi-Region support SHOULD be straightforward to add, if needed.
 
 3. **DynamoDB consistency**: the MPL's AWS KMS Key Store reads eventually consistently
    (`ConsistentRead` unset, `DDBKeystoreOperations.dfy`);
@@ -662,16 +702,28 @@ and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
    free threaded CPython is 3.13 and later;
    whether the native path targets the ESDK's versions, or newer.
 
+   UPDATE: The dependencies support free threaded CPython, practically from 3.14t
+   ([5.5](#55-the-dependencies-on-free-threaded-cpython)).
+   Which versions the native path supports, with the GIL, remains open.
+
 5. **Branch Key creation**: whether onboarding stays on the MPL's AWS KMS Key Store,
    so that the MPL remains a dependency of the application, though not of its hot path.
 
+   UPDATE: Onboarding stays on the MPL's AWS KMS Key Store, for now.
+   It MAY be ported later, for the native path's better errors ([6](#6-negative-caching)).
+
 6. **One Branch Key ID per MKP**: as the Tenant Keyring Factory vends today;
    or a Branch Key ID supplier, if a Tenant has several.
+
+   UPDATE: One Branch Key ID per Multi-Tenant Hierarchical MKP; no supplier, for now
+   ([Out of Scope](#out-of-scope)). How a supplier combines with the per Tenant factory is not yet designed.
 
 7. **The specification revision for Duvet** ([9.3](#93-which-specification)):
    update this repository's `aws-encryption-sdk-specification` submodule to the MPL's pin,
    and re-extract its existing citations' text;
    or check out the MPL's pin a second time, for the native path's report only.
+
+   UPDATE: A second checkout, at the MPL's pin ([9.3](#93-which-specification)).
 
 # Consequences
 
