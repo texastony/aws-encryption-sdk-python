@@ -44,11 +44,32 @@ so that each can decrypt what the other encrypted.
 The native cache of Branch Key materials this document designs,
 shared by every Multi-Tenant Hierarchical MKP in a process.
 
+## Hierarchy version 2 (HV-2)
+
+The Branch Key format of
+[aws-encryption-sdk-specification#297](https://github.com/awslabs/aws-encryption-sdk-specification/pull/297),
+"feat(branch-keys): add hv-2 spec" (open, as of this writing),
+implemented by the MPL's `release/hv-2` branch (unreleased).
+Its Branch Key Store protects each item's Branch Key Context with a SHA-384 digest inside the KMS plaintext,
+instead of in the AWS KMS encryption context
+([4.1](#41-hierarchy-version-2-only)).
+
+## Branch Key Context
+
+The item's attributes but `enc`, plus `tablename`, the Logical Key Store Name
+(`branch-key-store.md`, Branch Key Context, at #297).
+
+## Native Key Store
+
+The Key Store this document designs, which replaces the MPL's AWS KMS Key Store
+for HV-2 Branch Keys only: reading, creating, and versioning them.
+
 ## Fetch
 
-Reading a Branch Key version from the AWS KMS Key Store:
+Reading a Branch Key version from the Native Key Store:
 one DynamoDB `GetItem`, then one `kms:Decrypt` of its `enc` attribute,
-signed with the Tenant's Credentials.
+signed with the Tenant's Credentials,
+then verifying the Branch Key Context's digest.
 
 # Background
 
@@ -86,6 +107,13 @@ The MPL path is formally verified;
 the native path will not be.
 This is the trade this document weighs.
 
+The Native Key Store supports HV-2 Branch Keys only
+([4.1](#41-hierarchy-version-2-only)).
+HV-2 is not released, in the specification or in any MPL;
+so the native path is written against
+the specification at #297's head (`fc08e88`)
+and the MPL's `release/hv-2` branch, which pins that revision.
+
 # Requirements
 
 1. The Multi-Tenant Hierarchical MKP MUST decrypt every message
@@ -93,10 +121,12 @@ This is the trade this document weighs.
    and the AWS KMS Hierarchical Keyring MUST decrypt every message
    the Multi-Tenant Hierarchical MKP encrypts
    ([3](#3-wire-compatibility)).
+   For HV-2 Branch Keys, that is an AWS KMS Hierarchical Keyring
+   on an HV-2 AWS KMS Key Store: today, only the MPL's `release/hv-2`.
 
-2. The native path MUST NOT import the MPL,
-   for encrypt or decrypt.
-   Creating and versioning Branch Keys MAY still use the MPL's AWS KMS Key Store.
+2. The native path MUST NOT import the MPL:
+   not to encrypt or decrypt, nor to create or version Branch Keys
+   ([4.3](#43-creating-and-versioning-branch-keys)).
 
 3. Every object shared between threads MUST be thread safe,
    without relying on the Global Interpreter Lock:
@@ -125,9 +155,13 @@ This is the trade this document weighs.
    ([8](#8-verification)).
 
 9. The native Branch Key reader MUST offer strongly consistent reads, as an option
-   ([4.1](#41-read-consistency)).
+   ([4.4](#44-read-consistency)).
 
-10. The native path MUST be annotated with Duvet,
+10. The Native Key Store MUST read, create, and version HV-2 Branch Keys only;
+    it MUST fail on an item whose `hierarchy-version` is not 2
+    ([4.1](#41-hierarchy-version-2-only)).
+
+11. The native path MUST be annotated with Duvet,
     citing the specification as the MPL's Dafny does, wherever it can;
     and every citation of the MPL's Dafny on the paths it replaces
     MUST be cited, or excepted with a reason
@@ -135,11 +169,13 @@ This is the trade this document weighs.
 
 # Out of Scope
 
-- Creating, versioning, and mutating Branch Keys:
-  rare, off the hot path, and already safe through the MPL's AWS KMS Key Store.
+- Mutating Branch Keys (the MPL's mutations), including converting HV-1 Branch Keys to HV-2:
+  an application with HV-1 Branch Keys converts them with an HV-2 MPL first, or stays on the MPL path.
+- Beacon keys' use (`GetBeaconKey`), which the AWS Database Encryption SDK needs, not the ESDK;
+  `CreateKey` still writes the beacon item, as the specification requires ([4.3](#43-creating-and-versioning-branch-keys)).
 - Sharing cache entries with MPL keyrings in the same process:
   the Branch Key Cache is native only.
-- Hierarchy version 2 Branch Keys, which were never shipped.
+- Hierarchy version 1 Branch Keys: the Native Key Store rejects them ([4.1](#41-hierarchy-version-2-only)).
 - The MPL's Required Encryption Context CMM, and other MPL only features
   ([2](#2-keyring-or-master-key-provider)).
 - More than one AWS Region, in the first version: every Tenant's KMS key, and the AWS KMS Key Store's table,
@@ -161,15 +197,18 @@ Each piece, and what replaces it:
 | AWS KMS Hierarchical Keyring                 | the Multi-Tenant Hierarchical MKP and its Master Key | every operation |
 | Storm tracking Cryptographic Materials Cache | the Branch Key Cache                       | every operation    |
 | Cache Guard, Negative Cache Entries          | part of the Branch Key Cache               | every operation    |
-| AWS KMS Key Store, `GetActiveBranchKey`      | a native Branch Key reader                 | every cache miss   |
-| AWS KMS Key Store, `GetBranchKeyVersion`     | the same reader                            | every cache miss   |
-| AWS KMS Key Store, `CreateKey`, `VersionKey` | unchanged: the MPL's AWS KMS Key Store     | no                 |
+| AWS KMS Key Store, `GetActiveBranchKey`      | the Native Key Store, HV-2                 | every cache miss   |
+| AWS KMS Key Store, `GetBranchKeyVersion`     | the Native Key Store, HV-2                 | every cache miss   |
+| AWS KMS Key Store, `CreateKey`, `VersionKey` | the Native Key Store, HV-2                 | no: onboarding, rotation |
 | KDF in Counter Mode, AES-GCM                 | `cryptography`                             | every operation    |
+| SHA-384 digest of the Branch Key Context     | `hashlib`                                  | every cache miss   |
 
 Already native, and unchanged:
 the Shared Transport, the Tenant KMS Client, Negative Cache Entries' Denial classification
 (`negative_cache.py`, which does not import the MPL),
 and the DynamoDB client.
+
+So the application depends on the MPL not at all.
 
 The Tenant Keyring Factory becomes a Tenant MKP Factory:
 the same shared state ([negative_caching.md 7.2](./negative_caching.md#72-a-tenant-keyring-factory)),
@@ -262,29 +301,122 @@ as the MPL's CMM does before calling keyrings;
 the interoperability tests MUST cover signing and non signing suites
 ([8](#8-verification)).
 
-## 4 Reading Branch Keys
+## 4 The Native Key Store
 
-A native reader replaces `GetActiveBranchKey` and `GetBranchKeyVersion`.
-It MUST implement the AWS KMS Key Store's read path
-(`branch-key-store.md`, AWS KMS Branch Key Decryption), including:
+### 4.1 Hierarchy version 2 only
+
+The Native Key Store reads, creates, and versions HV-2 Branch Keys only,
+and fails on any other `hierarchy-version` (Requirement 10).
+
+**Why HV-2**:  
+
+- **The AWS KMS encryption context is the Tenant's own.**
+  In HV-1, it is the whole Branch Key Context
+  (`branch-key-id`, `type`, `create-time`, `tablename`, `kms-arn`, `hierarchy-version`,
+  and the custom encryption context, prefixed `aws-crypto-ec:`).
+  In HV-2, it is only the custom encryption context, untransformed
+  (`branch-key-store.md`, AWS KMS Encryption Context, at #297):
+  a Tenant's Branch Key created with `{"tenant": "tenant-a"}`
+  is decrypted with exactly that encryption context.
+  So a Tenant's key policy or IAM policy can require it plainly
+  (`kms:EncryptionContext:tenant`),
+  or require that it be the only key (`ForAllValues:StringEquals` on `kms:EncryptionContextKeys`),
+  which the HV-1 encryption context's fixed keys make impossible.
+- **Creating a Branch Key needs only `kms:GenerateDataKey` and `kms:Encrypt`**,
+  not `kms:GenerateDataKeyWithoutPlaintext` and `kms:ReEncrypt`
+  (`branch-key-store.md`, Wrapped Branch Key Creation `v2`).
+  A Tenant's credentials need the same actions as any envelope encryption:
+  `kms:GenerateDataKey`, `kms:Encrypt`, and `kms:Decrypt`.
+- **The Branch Key Context is authenticated by a digest**, not by AWS KMS:
+  the KMS plaintext is the SHA-384 digest of the serialized Branch Key Context, then the Branch Key;
+  so the item cannot be altered without the decryption failing,
+  and the item has no attributes beyond the Branch Key Context.
+- **One version**: the Native Key Store implements one Branch Key format, not two.
+
+**What it costs**:  
+
+- HV-2 is not released: the specification is
+  [#297](https://github.com/awslabs/aws-encryption-sdk-specification/pull/297), open,
+  and the MPL's implementation is its `release/hv-2` branch, unreleased.
+  The native path is written against both, and MUST be revisited when they are released.
+- No released MPL can read or create HV-2 Branch Keys;
+  so the MPL path cannot decrypt the native path's messages until an HV-2 MPL is released,
+  and onboarding MUST be native ([4.3](#43-creating-and-versioning-branch-keys)).
+- Tenants with HV-1 Branch Keys cannot use the native path
+  until their Branch Keys are converted ([Out of Scope](#out-of-scope)).
+
+**The Tenant KMS Client**:  
+its Denial recording checks the request's `branch-key-id` against its Branch Key ID,
+and its source says it assumes HV-1 ([negative_caching.md 6](./negative_caching.md#6-why-the-branch-key-id-and-not-the-kms-key-arn)).
+An HV-2 request never has a `branch-key-id`,
+so that check never applies, and the Denial is attributed by the binding alone;
+the comment, and `negative_caching.md` 6, MUST be revised with the native path.
+
+### 4.2 Reading Branch Keys
+
+The Native Key Store replaces `GetActiveBranchKey` and `GetBranchKeyVersion`,
+as `branch-key-store.md` specifies them at #297, for HV-2:
 
 - one DynamoDB `GetItem` of the `branch:ACTIVE` item, or of the `branch:version:<version>` item
-- the encryption context built from every item attribute but `enc`,
-  plus `tablename`, the Logical Key Store Name;
-  custom encryption context attributes are already prefixed `aws-crypto-ec:`
-- `hierarchy-version` MUST be 1
+  ([4.4](#44-read-consistency))
+- the record format: every attribute a string, but `hierarchy-version` (a number) and `enc` (binary);
+  `hierarchy-version` MUST be 2;
+  and the Branch Key Context MUST NOT have any key beyond those the specification names
 - the `kms-arn` rules of the configured AWS KMS Configuration:
   compatible with the configured KMS Key for `KMS Key ARN`;
   not an alias, for `Discovery`
-- `kms:Decrypt` with `KeyId` and that encryption context, through the Tenant KMS Client;
-  the plaintext MUST be 32 bytes
+- `kms:Decrypt` through the Tenant KMS Client, with `KeyId`,
+  and the encryption context: the item's `aws-crypto-ec:` attributes, without the prefix
+- the plaintext's first 48 bytes MUST equal the SHA-384 digest of the Branch Key Context,
+  serialized as an encryption context (`structures.md`, Serialization),
+  as the specification requires; compared in constant time (`hmac.compare_digest`)
+- the rest MUST be the 32 byte Branch Key, so the plaintext is 80 bytes:
+  the specification does not say so, but `release/hv-2` requires it (`GetKeys.dfy`, `HierarchicalVersionUtils.dfy`),
+  and its `-wrong-ciphertext-length` static Branch Key tests it
 - Branch Key materials: the Branch Key ID, the version, the 32 byte key, and the custom encryption context
 
-The MPL's static test Branch Keys, including the lying Branch Key,
-and its `TestLyingBranchKey.dfy` and `TestDiscoveryGetKeys.dfy` cases,
-SHOULD be ported as tests.
+The MPL's static HV-2 test Branch Keys, in `KeyStoreDdbTable`,
+SHOULD be ported as real AWS tests, as the static HV-1 keys were (PR #6):
+`hv2BranchKeyId` (`4a0c7b92-3703-4209-8961-24b07ab6562b`),
+and the invalid ones, whose items are kept wrong on purpose:
+`DO-NOT-DELETE-test-hv2-get-key-wrong-kms-arn`,
+`-wrong-digest`, `-wrong-ciphertext`, and `-wrong-ciphertext-length`.
 
-### 4.1 Read consistency
+### 4.3 Creating and versioning Branch Keys
+
+Onboarding and rotation are native too (Requirement 2),
+as `branch-key-store.md` specifies them at #297, always with `hierarchy-version` 2:
+
+**`CreateKey`**:  
+
+- the Branch Key ID: the application's (with an encryption context, which is then REQUIRED),
+  or a version 4 UUID
+- MUST fail for `Discovery`: creating needs a KMS key ARN;
+  so, as today, onboarding uses a Native Key Store configured with the Tenant's KMS key ARN
+- the `DECRYPT_ONLY` and `ACTIVE` Branch Key Contexts, and each one's SHA-384 digest
+- one `kms:GenerateDataKey` (32 bytes, the custom encryption context) for the Branch Key;
+  then one `kms:Encrypt` of the `DECRYPT_ONLY` digest and the Branch Key,
+  and one of the `ACTIVE` digest and the Branch Key
+- the beacon key, as Wrapped Beacon Key Creation `v2` specifies,
+  as the specification requires it of `CreateKey`, though the ESDK does not use it
+- one DynamoDB `TransactWriteItems` of the three items,
+  each with `attribute_not_exists(branch-key-id)`
+
+**`VersionKey`**:  
+
+- `GetItem` of the `ACTIVE` item ([4.4](#44-read-consistency) applies),
+  authenticated as Authenticating a Branch Keystore item for item with `hierarchy-version` v2
+- its `kms-arn` MUST be compatible with the configured KMS key, and MUST NOT change
+- a new version: `kms:GenerateDataKey`, then the two `kms:Encrypt` calls, as `CreateKey`
+- one `TransactWriteItems`: the new `DECRYPT_ONLY` item, with `attribute_not_exists(branch-key-id)`,
+  and the `ACTIVE` item, with `enc = :encOld`;
+  so of two concurrent `VersionKey` calls, one fails, rather than both writing
+
+Creation and versioning are rare, and not on the hot path;
+nothing they hold is shared between threads.
+A Branch Key version already cached is served until its entry expires ([4.4](#44-read-consistency)).
+
+### 4.4 Read consistency
 
 The MPL's AWS KMS Key Store reads eventually consistently:
 its `GetItem` requests leave `ConsistentRead` unset
@@ -325,11 +457,10 @@ applied to every `GetItem` it makes:
 
 - `False`, the default: read operations MAY return stale results, as the MPL's AWS KMS Key Store reads today
 - `True`: every `GetItem` sets `ConsistentRead` to `true`, for applications that create or version Branch Keys
-  and use them at once, on any host
+  and use them at once, on any host; with native onboarding, that is every application that onboards Tenants
+  while serving them
 
-If #1645 is released,
-an application SHOULD give the MPL's AWS KMS Key Store, which creates and versions its Branch Keys,
-the same setting.
+The Native Key Store's `VersionKey` read honors it too, as #302 specifies.
 
 It is configured per Tenant MKP Factory,
 so every Tenant's reader in a process reads the same way.
@@ -526,6 +657,11 @@ from the first request on;
 not the MPL's `KeyStore` and `OpaqueWithTextError` wrapping
 (the multi-tenant Hierarchical Keyring example's docstring).
 
+An HV-2 digest mismatch is not a Denial:
+AWS KMS decrypted the item, and the item was altered;
+it MUST fail the request, and MUST NOT be negatively cached as a Denial,
+as retrying cannot succeed but the cause is the table, not the Tenant's KMS resources.
+
 ## 7 Where does it live?
 
 ### 7.1 In the examples
@@ -548,13 +684,18 @@ To be decided; 7.1 first, to measure.
 The MPL path's correctness is proven;
 the native path's MUST be tested:
 
-- **Interoperability**, both directions:
+- **Interoperability**, both directions, with the MPL's `release/hv-2`:
   the Multi-Tenant Hierarchical MKP decrypts the AWS KMS Hierarchical Keyring's messages, and the reverse;
+  and Branch Keys the Native Key Store creates are read by `release/hv-2`'s AWS KMS Key Store, and the reverse;
   every committing algorithm suite, signing and not;
   empty, small, and large encryption contexts; one and many encrypted data keys.
+  `release/hv-2` is unreleased; see [Open Questions](#open-questions).
+- **The digest**: the Branch Key Context's serialization and SHA-384 digest,
+  against `release/hv-2`'s, for random contexts.
 - **The KDF**, against the MPL's `KdfCtr`, for random inputs.
 - **Test vectors**: the MPL's Hierarchical Keyring test vectors, where they apply.
-- **The reader**: the Key Store's validation cases, ported (4).
+- **The Native Key Store**: `release/hv-2`'s Key Store validation cases, ported;
+  and the static HV-2 Branch Keys, valid and invalid, against real AWS ([4.2](#42-reading-branch-keys)).
 - **Thread safety**:
   - deterministic tests that force each interleaving of [5.3](#53-single-flight-fetches),
     with injected pauses, as `test_negative_cache.py`'s thread safety test does
@@ -582,7 +723,7 @@ so its Duvet annotations, and its tests' (`type=test`), carry more of the weight
 The native path MUST carry the citations the MPL's Dafny carries,
 on the code that does the same thing:
 the same section, and the same quoted text.
-On the paths it replaces, at the MPL's `v1.11.3`, those are:
+On the paths it replaces, in the MPL's `release/hv-2` (pinning the specification at `fc08e88`), those are:
 
 | Specification section                                                          | Citations | MPL Dafny source                |
 | ------------------------------------------------------------------------------ | --------- | ------------------------------- |
@@ -592,14 +733,27 @@ On the paths it replaces, at the MPL's `v1.11.3`, those are:
 | `aws-kms/aws-kms-hierarchical-keyring.md#initialization`                       | 3         | `AwsKmsHierarchicalKeyring.dfy` |
 | `aws-kms/aws-kms-hierarchical-keyring.md#branch-key-wrapping-and-unwrapping-aad` | 2       | `AwsKmsHierarchicalKeyring.dfy` |
 | `aws-kms/aws-kms-hierarchical-keyring.md#interface`, `#encryption-materials`, `#decryption-materials` | 3 | `AwsKmsHierarchicalKeyring.dfy` |
-| `branch-key-store.md#aws-kms-branch-key-decryption`                            | 14        | `GetKeys.dfy`                   |
+| `branch-key-store.md#aws-kms-branch-key-decryption`                            | 30        | `GetKeys.dfy`, `CreateKeys.dfy`, `KMSKeystoreOperations.dfy`, `Structure.dfy` |
 | `branch-key-store.md#getactivebranchkey`                                       | 7         | `GetKeys.dfy`                   |
 | `branch-key-store.md#getbranchkeyversion`                                      | 7         | `GetKeys.dfy`                   |
-| `branch-key-store.md#encryption-context`                                       | 10        | `Structure.dfy`                 |
-| `branch-key-store.md#branch-key-materials-from-authenticated-encryption-context` | 8       | `Structure.dfy`                 |
-| `branch-key-store.md#custom-encryption-context`                                | 6         | `Structure.dfy`                 |
-| `branch-key-store.md#active-encryption-context`                                | 3         | `Structure.dfy`                 |
-| `branch-key-store.md#record-format`                                            | 2         | `Structure.dfy`                 |
+| `branch-key-store.md#branch-key-context`                                       | 10        | `GetKeys.dfy`, `Structure.dfy`  |
+| `branch-key-store.md#branch-key-materials-from-authenticated-branch-key-context` | 9       | `Structure.dfy`                 |
+| `branch-key-store.md#active-branch-key-context`, `#beacon-branch-key-context`  | 5         | `Structure.dfy`                 |
+| `branch-key-store.md#record-format`                                            | 3         | `Structure.dfy`                 |
+| `branch-key-store.md#aws-kms-encryption-context`, `#encryption-context-from-authenticated-branch-key-context` | 4 | `GetKeys.dfy`, `HierarchicalVersionUtils.dfy`, `Structure.dfy` |
+| `branch-key-store.md#discovery`                                                | 3         | `GetKeys.dfy`                   |
+| `branch-key-store.md#createkey`, `#branch-key-and-beacon-key-creation`         | 13        | `AwsCryptographyKeyStoreOperations.dfy`, `CreateKeys.dfy` |
+| `branch-key-store.md#wrapped-branch-key-creation-v2`                           | 22        | `CreateKeys.dfy`                |
+| `branch-key-store.md#wrapped-beacon-key-creation-v2`                           | 16        | `CreateKeys.dfy`                |
+| `branch-key-store.md#writing-branch-key-and-beacon-key-to-branch-key-store-table` | 6      | `CreateKeys.dfy`, `DDBKeystoreOperations.dfy` |
+| `branch-key-store.md#versionkey`                                               | 18        | `AwsCryptographyKeyStoreOperations.dfy`, `CreateKeys.dfy`, `DDBKeystoreOperations.dfy` |
+| `branch-key-store.md#authenticating-a-branch-keystore-item-for-item-with-hierarchy-version-v2` | 6 | `CreateKeys.dfy` |
+
+The `v1` sections `release/hv-2` also cites
+(Wrapped Branch Key Creation `v1`, Wrapped Beacon Key Creation `v1`,
+Authenticating a Branch Keystore item for item with `hierarchy-version` v1),
+and the `v1` branches of the shared sections,
+are exceptions: the Native Key Store does not implement HV-1 (Requirement 10).
 
 In Python, as the MPL's own report reads `#` comments (`(# //=,# //#)`):
 
@@ -611,7 +765,7 @@ salt = os.urandom(16)
 
 **A parity check**:  
 a script MUST extract every (section, quote) the MPL's Dafny cites in those sources,
-at the MPL version the native path matches,
+at the MPL revision the native path matches (`release/hv-2`, until HV-2 is released),
 and fail if the native sources neither cite it nor except it.
 It runs in CI, beside `duvet report`;
 so a citation the MPL adds, or the native path drops, is caught.
@@ -636,7 +790,7 @@ The native path's own behavior, that the specification does not describe
 (the Branch Key Cache's thread safety, single flight Fetches, negative caching),
 is not cited; this document, and its tests, cover it.
 
-`Require Consistent Reads` ([4.1](#41-read-consistency)) is not in the specification yet;
+`Require Consistent Reads` ([4.4](#44-read-consistency)) is not in the specification yet;
 its citations are `type=todo` until
 [aws-encryption-sdk-specification#302](https://github.com/awslabs/aws-encryption-sdk-specification/pull/302)
 is merged.
@@ -645,26 +799,25 @@ is merged.
 
 Quotes MUST match the specification revision they cite, exactly.
 This repository's `aws-encryption-sdk-specification` submodule is pinned at `c35fbd9` (2021-06-18),
-which predates the AWS KMS Hierarchical Keyring;
-the MPL, at `v1.11.3` and on `main`, pins `8f4afff` (2024-06-05).
-The native path MUST cite the revision the MPL version it matches pins,
-so that its quotes, and the MPL's, are the same text.
+which predates the AWS KMS Hierarchical Keyring.
+The MPL, at `v1.11.3` and on `main`, pins `8f4afff` (2024-06-05),
+which has no HV-2, nor the Hierarchical Keyring's `Partition ID`, `Cache Type`, or Shared Cache Considerations,
+though `v1.11.3` implements the latter.
+The MPL's `release/hv-2` pins `fc08e88` (2025-08-29), the head of #297,
+which has HV-2 and all of the latter.
 
-That revision lags the MPL itself:
-at `8f4afff`, the AWS KMS Hierarchical Keyring's Initialization has no `Partition ID` or `Cache Type`,
-and there is no Shared Cache Considerations section,
-though the MPL implements both, and the specification's current `master` describes them.
-The native path's Tenant isolation ([negative_caching.md 8](./negative_caching.md#8-the-partition-id-revisited))
-can be cited only against a newer revision.
-Either this repository's submodule is updated,
-which changes the text its existing citations quote,
-or the native path's report uses a second checkout, pinned to the MPL's revision;
-see [Open Questions](#open-questions).
+The native path's Duvet uses a second checkout of the specification,
+pinned to `fc08e88`, the revision `release/hv-2` pins;
+used only by the native path's `duvet extract` and `duvet report`.
+This repository's existing submodule, and its citations, are unchanged.
+At `fc08e88`, the native path's Tenant isolation
+([negative_caching.md 8](./negative_caching.md#8-the-partition-id-revisited))
+can be cited: the Hierarchical Keyring's `Partition ID`, and Shared Cache Considerations.
 
-UPDATE: A second checkout of the specification, pinned to the MPL's revision,
-used only by the native path's `duvet extract` and `duvet report`;
-this repository's existing submodule, and its citations, are unchanged.
-When the native path is matched to a newer MPL release, its pin moves to that release's.
+#297 is open; its text may change before it is merged,
+and every quote of it with it.
+When it is merged, and an HV-2 MPL is released,
+the pin moves to that release's, and the parity check (9.1) to that release.
 
 ### 9.4 The tool
 
@@ -696,7 +849,7 @@ and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
    new ACTIVE version seen at once, which a strongly consistent read costs twice as much for.
 
    UPDATE: The native reader offers strongly consistent reads, as an option;
-   the default matches the MPL ([4.1](#41-read-consistency)).
+   the default matches the MPL ([4.4](#44-read-consistency)).
 
 4. **Supported Python versions**: the ESDK supports 3.8;
    free threaded CPython is 3.13 and later;
@@ -712,6 +865,9 @@ and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
    UPDATE: Onboarding stays on the MPL's AWS KMS Key Store, for now.
    It MAY be ported later, for the native path's better errors ([6](#6-negative-caching)).
 
+   UPDATE: Superseded. The Native Key Store is HV-2 only, and no released MPL can create HV-2 Branch Keys;
+   so onboarding is native ([4.3](#43-creating-and-versioning-branch-keys)).
+
 6. **One Branch Key ID per MKP**: as the Tenant Keyring Factory vends today;
    or a Branch Key ID supplier, if a Tenant has several.
 
@@ -725,6 +881,17 @@ and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
 
    UPDATE: A second checkout, at the MPL's pin ([9.3](#93-which-specification)).
 
+   UPDATE: At `release/hv-2`'s pin, `fc08e88`, the head of #297 ([9.3](#93-which-specification)).
+
+8. **Testing against an unreleased MPL**: interoperability (Requirement 1, [8](#8-verification))
+   needs the MPL's `release/hv-2`, which has no Python release;
+   built from source (Dafny, then Python),
+   or messages and Branch Keys produced by it once, and kept as test vectors.
+
+9. **#297 before it is merged**: how closely to track it;
+   a change to HV-2's format before release would change the Native Key Store,
+   its stored Branch Keys, and its citations.
+
 # Consequences
 
 - Every citation the MPL adds to the paths the native path replaces
@@ -736,6 +903,10 @@ and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
   a change to either MUST be made to both.
 - MKPs are the ESDK's legacy interface;
   MPL only features are unavailable on the native path.
+- The Native Key Store is HV-2 only, and HV-2 is unreleased:
+  the native path depends on an open specification pull request (#297) and an unreleased MPL branch,
+  and the MPL path cannot decrypt its messages until an HV-2 MPL is released.
+  Tenants with HV-1 Branch Keys stay on the MPL path until their Branch Keys are converted.
 - Applications SHOULD measure their own workload first:
   the gain is per cached operation,
   and a workload dominated by cache misses gains little.
