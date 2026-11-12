@@ -167,6 +167,10 @@ and the MPL's `release/hv-2` branch, which pins that revision.
     MUST be cited, or excepted with a reason
     ([9](#9-specification-compliance-duvet)).
 
+12. Every request the native path makes, to AWS KMS and to Amazon DynamoDB,
+    MUST be non blocking (`asyncio`): no thread, and no event loop, waits on the network
+    ([10](#10-non-blocking-io)).
+
 # Out of Scope
 
 - Mutating Branch Keys (the MPL's mutations), including converting HV-1 Branch Keys to HV-2:
@@ -203,10 +207,12 @@ Each piece, and what replaces it:
 | KDF in Counter Mode, AES-GCM                 | `cryptography`                             | every operation    |
 | SHA-384 digest of the Branch Key Context     | `hashlib`                                  | every cache miss   |
 
-Already native, and unchanged:
-the Shared Transport, the Tenant KMS Client, Negative Cache Entries' Denial classification
+Already native, and reused:
+Negative Cache Entries' Denial classification
 (`negative_cache.py`, which does not import the MPL),
-and the DynamoDB client.
+and the Shared Transport's signing, error mapping, retries, and region validation.
+The Shared Transport, the Tenant KMS Client, and boto3's DynamoDB client block;
+the native path replaces them with an Async Transport ([10](#10-non-blocking-io)).
 
 So the application depends on the MPL not at all.
 
@@ -346,6 +352,7 @@ and fails on any other `hierarchy-version` (Requirement 10).
   until their Branch Keys are converted ([Out of Scope](#out-of-scope)).
 
 **The Tenant KMS Client**:  
+(and the Async Transport's Denial recording, which inherits it)
 its Denial recording checks the request's `branch-key-id` against its Branch Key ID,
 and its source says it assumes HV-1 ([negative_caching.md 6](./negative_caching.md#6-why-the-branch-key-id-and-not-the-kms-key-arn)).
 An HV-2 request never has a `branch-key-id`,
@@ -365,7 +372,7 @@ as `branch-key-store.md` specifies them at #297, for HV-2:
 - the `kms-arn` rules of the configured AWS KMS Configuration:
   compatible with the configured KMS Key for `KMS Key ARN`;
   not an alias, for `Discovery`
-- `kms:Decrypt` through the Tenant KMS Client, with `KeyId`,
+- `kms:Decrypt` through the Async Transport, with the Tenant's Credentials, `KeyId`,
   and the encryption context: the item's `aws-crypto-ec:` attributes, without the prefix
 - the plaintext's first 48 bytes MUST equal the SHA-384 digest of the Branch Key Context,
   serialized as an encryption context (`structures.md`, Serialization),
@@ -499,9 +506,8 @@ any read and write of shared mutable state may interleave.
 
 | Object                     | Shared by                          | Mutable after construction? | Safe because |
 | -------------------------- | ---------------------------------- | --------------------------- | ------------ |
-| Shared Transport           | every Tenant                       | its connection pool          | urllib3's pool is thread safe |
-| DynamoDB client            | every Tenant                       | no (boto3 clients)           | boto3 clients are thread safe; resources and sessions are not shared |
-| Tenant KMS Client          | one Tenant's MKPs                  | no                           | immutable references; botocore's `RefreshableCredentials` lock their own refresh |
+| Async Transport ([10](#10-non-blocking-io)) | every Tenant, on one event loop | its connection pool | one `aiohttp` session per event loop; never used from another loop |
+| Tenant's Credentials       | one Tenant's MKPs                  | when refreshed               | botocore's `RefreshableCredentials` lock their own refresh; refreshed off the event loop ([10.2](#102-credentials-without-blocking)) |
 | Branch Key Cache           | every Tenant                       | yes                          | [5.2](#52-the-branch-key-cache) |
 | Negative cache             | one Tenant and Branch Key ID       | yes                          | one lock, as today ([negative_caching.md 4.3](./negative_caching.md#43-a-cache-guard)) |
 | Multi-Tenant Hierarchical MKP    | MAY be shared, or one per request  | MUST NOT be                  | [5.4](#54-the-master-key-provider) |
@@ -571,7 +577,7 @@ so the next request fails without a Fetch.
 waiters stop waiting after the in flight TTL;
 the marker is then stale,
 and the next thread to find it MAY replace it and Fetch.
-The Tenant KMS Client's and DynamoDB client's timeouts bound how long that can be.
+The Async Transport's request timeouts bound how long that can be.
 
 **Refresh before expiry**:  
 as the storm tracking cache's grace period:
@@ -614,7 +620,8 @@ or share one per Tenant and Branch Key ID across threads.
 ### 5.5 The dependencies, on free threaded CPython
 
 The native path depends on the ESDK's runtime dependencies,
-and on botocore's, for the Tenant KMS Client and the DynamoDB client;
+on botocore's, for signing and credentials,
+and on `aiohttp`'s, for the Async Transport ([10](#10-non-blocking-io));
 not on the MPL.
 As of this writing (their latest releases, on PyPI):
 
@@ -624,6 +631,7 @@ As of this writing (their latest releases, on PyPI):
 | `boto3`, `botocore` | pure Python; classifier "Free Threading :: 2 - Beta"                      |
 | `urllib3`, `s3transfer`, `python-dateutil` | pure Python; classifier "Free Threading :: 2 - Beta" |
 | `wrapt`          | `cp314t` and `cp315t` wheels, and a pure Python fallback; no classifier      |
+| `aiohttp`        | `cp314t` and `cp315t` wheels; "5 - Production/Stable"; no free threading classifier |
 | `attrs`, `jmespath`, `six` | pure Python; no classifier                                         |
 
 So free threaded CPython is practical from 3.14t:
@@ -831,6 +839,120 @@ so its citations can be compared with the MPL's (9.1);
 its `duvet report` runs over the native sources and tests only,
 and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
 
+## 10 Non-blocking I/O
+
+Every request to AWS KMS and Amazon DynamoDB MUST be non blocking (Requirement 12):
+a high throughput service is usually an `asyncio` service,
+and a Fetch that blocks its event loop for the round trip to AWS KMS (100 ms, measured)
+stalls every other request on that loop.
+boto3, and the Shared Transport (urllib3), block.
+
+### 10.1 The client
+
+**10.1.1 The AWS SDK for Python v4** ([awslabs/aws-sdk-python](https://github.com/awslabs/aws-sdk-python)):
+AWS's async first SDK, generated by smithy-python, with `aws_sdk_kms` and `aws_sdk_dynamodb` clients.
+Its README: "experimental ... Do not use it for production workloads."
+Every client is "Development Status :: 2 - Pre-Alpha".
+And its KMS client is not on PyPI under its name:
+PyPI's `aws-sdk-kms` (0.1.0 to 0.3.0, depending on `zapros`) is not AWS's,
+and MUST NOT be installed for it.
+
+**10.1.2 aiobotocore** (aio-libs; "4 - Beta"; with aioboto3 above it):
+botocore, made async over `aiohttp`; mature, and widely used.
+However,
+each release supports a narrow range of botocore patch releases
+(3.10.0: `botocore>=1.43.115,<1.43.118`),
+so it constrains the application's boto3 and botocore;
+and it makes no claim of free threaded support.
+
+**10.1.3 Our own Async Transport**:
+the Shared Transport already signs and sends AWS KMS's JSON protocol itself ([design.md](./design.md)),
+using botocore only for SigV4 signing and credentials, which do no I/O.
+The native path needs five operations:
+AWS KMS `Decrypt`, `GenerateDataKey`, and `Encrypt` (JSON 1.1, `TrentService`),
+and Amazon DynamoDB `GetItem` and `TransactWriteItems` (JSON 1.0, `DynamoDB_20120810`).
+An Async Transport signs each as the Shared Transport does,
+and sends it with `aiohttp` ("5 - Production/Stable"; `cp314t` wheels),
+one `ClientSession` (one connection pool) per event loop.
+
+**10.1.4 awscrt**: AWS's Common Runtime, with an HTTP client and SigV4 signing,
+and `cp313t`/`cp314t` wheels;
+but its I/O is on its own threads, returning `concurrent.futures`, not `asyncio` native,
+and it is a lower level interface than the others.
+
+**Author's conclusion**:  
+10.1.3: our own Async Transport, on `aiohttp`, with botocore for signing and credentials.
+It adds no dependency that constrains the application's boto3,
+it is five operations, whose protocols we already implement,
+and its error mapping, retries, and region validation carry over from the Shared Transport.
+The AWS SDK for Python v4 SHOULD replace it when that SDK is generally available,
+and its KMS client is published.
+
+### 10.2 Credentials, without blocking
+
+botocore's `RefreshableCredentials` refresh synchronously, when `get_frozen_credentials()` finds them near expiry:
+an `sts:AssumeRole`, blocking, on whatever thread calls it,
+which, called on the event loop, blocks the loop.
+So the Async Transport MUST NOT call `get_frozen_credentials()` on the event loop
+when `refresh_needed()` is true;
+it calls it in a worker thread (`asyncio.to_thread`) then,
+and on the loop otherwise, where it returns at once.
+botocore's refresh holds its own lock, so concurrent refreshes do not duplicate the `sts:AssumeRole`.
+
+### 10.3 The ESDK is synchronous
+
+The ESDK's `encrypt` and `decrypt`, and a `MasterKey`'s `_generate_data_key`, `_encrypt_data_key`, and `_decrypt_data_key`,
+are synchronous: a Master Key cannot `await` a Fetch.
+
+**Resolve, then encrypt**:  
+the native path's interface is an async facade,
+`await tenant.encrypt(...)` and `await tenant.decrypt(...)`, vended by the Tenant MKP Factory:
+
+1. It runs the ESDK operation, synchronously, with an MKP that reads only the Branch Key Cache
+   and never does I/O: on a miss, it raises a `BranchKeyNotCached` naming the Branch Key ID and version
+   (the ACTIVE version, on encrypt; the encrypted data key's version, on decrypt).
+2. On `BranchKeyNotCached`, it awaits that Fetch, through the single flight of [5.3](#53-single-flight-fetches),
+   then runs the ESDK operation again; which now hits.
+
+A cache hit, nearly every operation, runs once, with no await;
+a miss costs one extra attempt of the ESDK operation's header processing,
+negligible beside the Fetch.
+It uses only the ESDK's public interface;
+parsing the message header to find the version first would use the ESDK's internal deserialization.
+The input MUST be bytes, not a stream, so that it can be read again;
+see [Open Questions](#open-questions).
+
+**The CPU work**:  
+the ESDK operation is CPU bound (1.3 ms, measured, for 1 KiB, on the native path).
+The facade runs it on the event loop for small messages,
+and in a worker thread (`asyncio.to_thread`) above a size the application configures;
+on free threaded CPython, those threads run in parallel.
+
+### 10.4 The Branch Key Cache, with an event loop
+
+The cache of [5.2](#52-the-branch-key-cache) is unchanged, with two rules:
+
+- **No await under a lock**: its stripe locks are `threading.Lock`s,
+  held only for a dictionary operation, never across an `await`;
+  so a coroutine never blocks the loop on one for longer than that.
+- **Single flight across event loops**: the in flight marker of [5.3](#53-single-flight-fetches)
+  is a `concurrent.futures.Future`, not an `asyncio.Future`, which belongs to one loop.
+  The fetcher completes it;
+  a waiter on any loop awaits it with `asyncio.wrap_future`,
+  and a waiter on a thread with no loop, with `.result(timeout)`.
+  So one Fetch serves every thread and loop of the process (Requirement 4),
+  as a free threaded service may run an event loop per thread.
+
+The Fetch itself is a coroutine, run on the waiting caller's loop, with that loop's Async Transport.
+
+### 10.5 What stays synchronous
+
+The Tenant KMS Client and the Shared Transport stay as they are, for the MPL path
+(the Tenant Keyring Factory, and the example), which is synchronous.
+A synchronous application MAY use the native path through a facade
+that runs the async one on a dedicated event loop thread (`asyncio.run_coroutine_threadsafe`);
+see [Open Questions](#open-questions).
+
 # Open Questions
 
 1. **The cache's eviction policy**: per stripe LRU, CLOCK, or TTL only; measured under contention.
@@ -892,6 +1014,13 @@ and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
    a change to HV-2's format before release would change the Native Key Store,
    its stored Branch Keys, and its citations.
 
+10. **Streaming**: the async facade ([10.3](#103-the-esdk-is-synchronous)) takes bytes,
+    so that a miss can retry; whether, and how, to support streams
+    (buffering the header, or parsing it with the ESDK's internal deserialization).
+
+11. **A synchronous interface**: whether the native path offers one, over a dedicated event loop thread
+    ([10.5](#105-what-stays-synchronous)), or is async only.
+
 # Consequences
 
 - Every citation the MPL adds to the paths the native path replaces
@@ -907,6 +1036,8 @@ and its HTML report is a CI artifact, as the MPL's `duvet.yaml` produces.
   the native path depends on an open specification pull request (#297) and an unreleased MPL branch,
   and the MPL path cannot decrypt its messages until an HV-2 MPL is released.
   Tenants with HV-1 Branch Keys stay on the MPL path until their Branch Keys are converted.
+- The native path is async: its interface is a coroutine facade, not the ESDK's `encrypt` and `decrypt` directly;
+  and its Async Transport is ours to maintain, until the AWS SDK for Python v4 is generally available.
 - Applications SHOULD measure their own workload first:
   the gain is per cached operation,
   and a workload dominated by cache misses gains little.
