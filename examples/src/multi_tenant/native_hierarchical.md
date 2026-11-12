@@ -187,6 +187,7 @@ and the MPL's `release/hv-2` branch, which pins that revision.
   which SHOULD be straightforward: the replica Region rewriting of `branch-key-store.md`'s AWS KMS Branch Key Decryption.
 - A Branch Key ID supplier, in the first version: each Multi-Tenant Hierarchical MKP is for one Tenant
   and one Branch Key ID. How a supplier would combine with the per Tenant factory is not yet designed.
+- Streaming: the native path encrypts and decrypts bytes, not streams ([10.3](#103-the-esdk-is-synchronous)).
 
 # Design Questions
 
@@ -919,14 +920,64 @@ a miss costs one extra attempt of the ESDK operation's header processing,
 negligible beside the Fetch.
 It uses only the ESDK's public interface;
 parsing the message header to find the version first would use the ESDK's internal deserialization.
-The input MUST be bytes, not a stream, so that it can be read again;
-see [Open Questions](#open-questions).
+The input is bytes, not a stream, so that it can be read again;
+streaming is out of scope ([Out of Scope](#out-of-scope)).
 
-**The CPU work**:  
-the ESDK operation is CPU bound (1.3 ms, measured, for 1 KiB, on the native path).
-The facade runs it on the event loop for small messages,
-and in a worker thread (`asyncio.to_thread`) above a size the application configures;
-on free threaded CPython, those threads run in parallel.
+### 10.3.1 Is the ESDK's own work blocking?
+
+Everything the ESDK does, but call its master keys, is CPU work:
+key derivation, encryption, signatures, and framing.
+On an event loop, CPU work blocks the loop for as long as it runs, `await` or not;
+only another thread moves it off the loop.
+So an async ESDK would not help; the question is only how long its work takes.
+
+Measured on the native path
+(Python 3.14, `cryptography` 50.0.2, OpenSSL 4.0.3, x86-64; 1 KiB messages; unprofiled):
+
+| Primitive, per message                                | Time      |
+| ----------------------------------------------------- | --------- |
+| `os.urandom`: the data key, IV, message ID            | 0.2-0.3 us |
+| HKDF-SHA512, KBKDF (HMAC-SHA256), SHA-384 of 1 KiB    | 4-7 us    |
+| AES-256-GCM, 1 KiB                                    | 3.7 us    |
+| P-384 public key decompression (decrypt)              | 84 us     |
+| ECDSA P-384 key generation (every signed encrypt)     | 205 us    |
+| ECDSA P-384 signing                                   | 268 us    |
+| ECDSA P-384 verification (every signed decrypt)       | 610 us    |
+
+| ESDK operation, 1 KiB                                         | encrypt | decrypt |
+| ------------------------------------------------------------- | ------- | ------- |
+| committing, signing (`AES_256_GCM_HKDF_SHA512_COMMIT_KEY_ECDSA_P384`, the default) | 1.09 ms | 1.50 ms |
+| committing, not signing (`AES_256_GCM_HKDF_SHA512_COMMIT_KEY`) | 0.17 ms | 0.20 ms |
+
+**Randomness does not block**:  
+`os.urandom` is `getrandom()` on Linux,
+which blocks only until the kernel's random pool is first initialized, early in boot; never in a running service.
+
+**Signatures are the cost**:  
+a signing suite costs 6 to 7 times a non signing one;
+under cProfile, ECDSA was 35% to 39% of a signing operation's own time,
+and the rest is mostly the ESDK's Python.
+Without signing, an operation is 0.2 ms of CPU, which an event loop can afford.
+
+**Threads help, even with the GIL**:  
+`cryptography` releases the GIL in most of the ECDSA work:
+on four threads of a GIL build, signing ran 1.9 times faster than on one,
+verification 2.8 times, and AES-GCM of 1 MiB 2.5 times;
+P-384 key generation did not (0.76 times), so it holds the GIL.
+On free threaded CPython, all of it runs in parallel.
+
+**Decision**:  
+the ESDK is used as it is, not made async.
+The async facade runs a non signing algorithm suite's operation on the event loop,
+and a signing suite's in a worker thread (`asyncio.to_thread`),
+so that a signing operation's 1 to 1.5 ms of CPU never blocks the loop.
+
+**Choosing the algorithm suite**:  
+the signature is what makes a message's author unforgeable by those who can only decrypt it:
+it matters when a message's readers are not trusted to write it.
+A service whose readers and writers are the same parties MAY choose
+the committing, non signing suite, for 6 to 7 times less CPU per message;
+the native path supports both, and the application chooses.
 
 ### 10.4 The Branch Key Cache, with an event loop
 
@@ -1017,6 +1068,8 @@ see [Open Questions](#open-questions).
 10. **Streaming**: the async facade ([10.3](#103-the-esdk-is-synchronous)) takes bytes,
     so that a miss can retry; whether, and how, to support streams
     (buffering the header, or parsing it with the ESDK's internal deserialization).
+
+    UPDATE: Streaming is out of scope ([Out of Scope](#out-of-scope)).
 
 11. **A synchronous interface**: whether the native path offers one, over a dedicated event loop thread
     ([10.5](#105-what-stays-synchronous)), or is async only.
